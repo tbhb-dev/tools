@@ -319,14 +319,8 @@ def test_git_suppresses_command_errors_and_returns_text(
         assert kwargs["text"]
         assert kwargs["stderr"] == subprocess.PIPE
         if command[-1] == r"^(filter|merge)\.":
-            assert command == [
-                *prefix,
-                "config",
-                "--null",
-                "--name-only",
-                "--get-regexp",
-                r"^(filter|merge)\.",
-            ]
+            options = ["config", "--null", "--name-only", "--get-regexp"]
+            assert command == [*prefix, *options, r"^(filter|merge)\."]
             return "filter.example.smudge\0merge.example.driver\0"
         assert command == [
             *prefix,
@@ -618,18 +612,14 @@ def test_fetch_resolves_only_a_full_commit(
             worktree.fetch_commit(tmp_path, request)
     else:
         assert worktree.fetch_commit(tmp_path, request) == commit_id
-    options = (
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--no-tags",
-        "--upload-pack=git-upload-pack",
-    )
+    options = ("--no-recurse-submodules", "--no-write-fetch-head", "--no-tags")
     assert calls == [
         ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
         ("check-ref-format", "--branch", "main"),
         (
             "fetch",
             *options,
+            "--upload-pack=git-upload-pack",
             "--no-prune",
             "origin",
             "+refs/heads/main:refs/heads/main",
@@ -802,8 +792,8 @@ def test_hook_installation_is_repeatable_private_and_read_only(
         original(path, mode=mode, exist_ok=exist_ok)
 
     monkeypatch.setattr(Path, "mkdir", mkdir)
-    worktree.install_hooks(tmp_path)
-    worktree.install_hooks(tmp_path)
+    worktree.install_hooks(tmp_path, "example", "a" * 40)
+    worktree.install_hooks(tmp_path, "example", "a" * 40)
     assert calls == [(str(tmp_path / ".git" / "hooks"), 0o700, True)] * 2
     hooks = tmp_path / ".git" / "hooks"
     assert hooks.stat().st_mode & 0o777 == 0o555
@@ -811,6 +801,7 @@ def test_hook_installation_is_repeatable_private_and_read_only(
         "pre-commit",
         "pre-push",
         "pre-push.prek",
+        "reference-transaction",
         "prepare-commit-msg",
         "prepare-commit-msg.prek",
         "commit-msg",
@@ -839,6 +830,7 @@ def test_hook_installation_is_repeatable_private_and_read_only(
         python=Path(sys.base_prefix, "bin", "python3"),
         mark=worktree.install.SHIM_MARK,
         pattern=worktree.TBHB_DEV_ORIGIN.pattern,
+        run_env={"TBHBDEV_RUN_NAME": "example"},
     )
 
 
@@ -846,8 +838,8 @@ def test_hook_installation_is_repeatable_private_and_read_only(
     ("failure", "message"),
     [
         ("disabled", r"^effective core\.hooksPath does not select the run's hooks$"),
-        ("missing", "run hook prepare-commit-msg is missing"),
-        ("mode", "run hook prepare-commit-msg is missing or not executable"),
+        ("missing", "run hook reference-transaction is missing"),
+        ("mode", "run hook reference-transaction is missing or not executable"),
     ],
 )
 def test_run_hook_verification_refuses_invalid_git_hooks(
@@ -855,7 +847,7 @@ def test_run_hook_verification_refuses_invalid_git_hooks(
 ) -> None:
     _, clone = repository(tmp_path)
     workspace = worktree.create(clone, "example", run_request())
-    hook = workspace / ".git/hooks/prepare-commit-msg"
+    hook = workspace / ".git/hooks/reference-transaction"
     env = dict(os.environ)
     if failure == "disabled":
         env.update(
@@ -881,8 +873,12 @@ def test_run_hook_verification_refuses_invalid_git_hooks(
         return output(command, **options)
 
     monkeypatch.setattr(subprocess, "check_output", probe)
-    with pytest.raises(Invalid, match=message):
-        worktree.verify_run_hooks(workspace, env)
+    if failure == "disabled":
+        with pytest.raises(Invalid, match=message):
+            worktree.verify_run_hooks(workspace, env)
+    else:
+        with pytest.raises(Invalid, match=message):
+            worktree.verify_hook_files(workspace)
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
@@ -927,12 +923,7 @@ def test_prelaunch_git_protocol(
     monkeypatch.setattr(worktree, "git", checked)
 
     assert worktree.create(clone, "protocol", request) == workspace
-    options = (
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--no-tags",
-        "--upload-pack=git-upload-pack",
-    )
+    options = ("--no-recurse-submodules", "--no-write-fetch-head", "--no-tags")
     common = [
         (mirror, ("init", "--bare", "--template=")),
         (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
@@ -942,6 +933,7 @@ def test_prelaunch_git_protocol(
             (
                 "fetch",
                 *options,
+                "--upload-pack=git-upload-pack",
                 "--no-prune",
                 "origin",
                 "+refs/heads/main:refs/heads/main",
@@ -1209,12 +1201,67 @@ def test_hook_installation_precedes_checkout(
     _, clone = repository(tmp_path)
     install = worktree.install_hooks
 
-    def checked(path: Path) -> None:
+    def checked(path: Path, name: str, start: str) -> None:
         assert not (path / "tracked").exists()
-        install(path)
+        assert name == "ordered"
+        assert start == git(clone, "rev-parse", "HEAD")
+        install(path, name, start)
 
     monkeypatch.setattr(worktree, "install_hooks", checked)
     worktree.create(clone, "ordered", run_request())
+
+
+def test_run_reference_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, clone = repository(tmp_path)
+    outside = git(seed, "rev-parse", "HEAD")
+    start = commit(seed, "run start")
+    git(seed, "push", "origin", "main")
+    path = worktree.create(clone, "example", run_request())
+    branch = "refs/heads/agent/example"
+
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    tool = binary / "tbhbdev"
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binary}:{os.environ['PATH']}")
+    git(path, "config", "user.name", "Example")
+    git(path, "config", "user.email", "example@example.test")
+    git(path, "config", "commit.gpgsign", "false")
+
+    for args, reason in (
+        (("checkout", "-b", "other"), f"refs/heads/other may only update {branch}"),
+        (("reset", "--hard", outside), f"{branch} must descend from {start}"),
+    ):
+        result = subprocess.run(
+            ["git", *args], cwd=path, capture_output=True, text=True, check=False
+        )
+        assert result.returncode != 0
+        assert f"reference-transaction: {reason}" in result.stderr
+        assert git(path, "rev-parse", "HEAD") == start
+
+    (path / "run.txt").write_text("run change\n")
+    git(path, "add", "run.txt")
+    git(path, "commit", "-qm", "run change")
+    upstream = commit(seed, "upstream change")
+    git(seed, "push", "origin", "main")
+    git(path, "fetch", str(tmp_path / "origin"), "main:refs/remotes/upstream/main")
+    git(path, "rebase", "upstream/main")
+    assert git(path, "rev-parse", "HEAD^") == upstream
+
+    (path / "run.txt").write_text("stashed change\n")
+    git(path, "stash", "push")
+    git(path, "stash", "pop")
+    assert (path / "run.txt").read_text() == "stashed change\n"
+    git(path, "restore", "run.txt")
+    git(path, "tag", "point")
+    git(path, "switch", "--detach", outside)
+    git(path, "commit", "--allow-empty", "-qm", "detached change")
+    git(path, "branch", "-D", "agent/example")
+    assert git(path, "for-each-ref", branch) == ""
+    assert git(path, "rev-parse", "point^") == upstream
 
 
 @pytest.mark.parametrize(
@@ -1631,7 +1678,7 @@ def test_hook_lock_covers_nested_directories_and_data(tmp_path: Path) -> None:
     data = tmp_path / ".git/hooks/nested/data"
     data.write_text("fixture")
     data.chmod(0o644)
-    worktree.install_hooks(tmp_path)
+    worktree.install_hooks(tmp_path, "example", "a" * 40)
     assert data.stat().st_mode & 0o777 == 0o444
     assert data.parent.stat().st_mode & 0o777 == 0o555
     assert data.parent.parent.stat().st_mode & 0o777 == 0o555
@@ -1722,7 +1769,7 @@ def test_hook_lock_preserves_executable_type(tmp_path: Path, mode: int) -> None:
     executable = tmp_path / ".git/hooks/extra-script"
     executable.write_text("#!/bin/sh\n")
     executable.chmod(mode)
-    worktree.install_hooks(tmp_path)
+    worktree.install_hooks(tmp_path, "example", "a" * 40)
     assert executable.stat().st_mode & 0o777 == 0o555
 
 

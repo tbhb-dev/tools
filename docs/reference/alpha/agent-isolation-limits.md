@@ -2,12 +2,11 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex:0.171.0
+    harness: codex:0.166.0
     model: openai:gpt-6.1-sol
-    effort: high
     surface: exec
-    session: sha-256-64:fe574980984d28b3
-    at: "2026-11-26T04:41:34Z"
+    session: sha-256-64:bb854b7878737d0a
+    at: "2026-11-26T07:14:41Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -18,7 +17,7 @@ type: Reference
 
 Run-host runs git in a run clone only during `clone_run` and `create`, before launch. After the harness starts, run-host never runs git in that clone. The controller's `diff` command can read committed work there through the run account's SSH connection. An operator who runs `git add -A` or `git stash` in a run clone can run a nested repository's clean filter. The port never runs those commands in a run clone.
 
-Run-host checks out a new build branch from a commit and leaves upstream tracking unset before launch. The legacy sandbox probes keep `.git/config` read-only. In those probes, use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
+Run-host checks out `agent/NAME` for a build and leaves upstream tracking unset. Each run clone gets a `reference-transaction` hook pinned to the run branch and starting commit. In prepared transactions, it refuses updates to other local branches and requires each new run-branch tip to descend from the start. Git's files backend can rename a branch without reporting a prepared transaction. Deleting the run branch and updating tags, remote-tracking refs, the stash, and detached `HEAD` are allowed. The pre-push hook accepts only `refs/heads/agent/NAME` as a branch destination. Run-host's own Git commands run with hooks disabled. The legacy sandbox probes keep `.git/config` read-only. In those probes, use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
 
 Every `agent exec` run has the account’s full access. It can read the account’s 1Password Connect token and every secret the account can read, and write anything the account can write. Codex, Claude and agy use this behavior for both build and review profiles. The agent account supplies the boundary. A child can leave the process group and keep running after the run ends.
 Runs skip sandbox policy checks, executable trust checks and write-root audits. They still refuse mise shims.
