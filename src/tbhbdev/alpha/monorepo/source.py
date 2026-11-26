@@ -2,12 +2,18 @@
 
 import re
 import subprocess  # nosec B404
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # The source clone is downloaded data, so Git runs without its fsmonitor or
 # pager settings. Paths are literal, because file names can hold glob magic.
 SAFE = ("-c", "core.fsmonitor=false", "-c", "core.pager=cat", "--literal-pathspecs")
 ORIGIN = re.compile(r"github\.com[:/]([^/:]+/[^/]+?)(?:\.git)?/?$")
+BATCH = 100
+# The git modes of a symbolic link and of an executable file.
+LINK, EXECUTABLE = "120000", "100755"
 
 
 class MonorepoError(Exception):
@@ -86,3 +92,18 @@ def files(clone: str, commit: str) -> dict[str, Blob]:
             raise MonorepoError(message)
         found[path] = Blob(mode, oid)
     return found
+
+
+def contents(clone: str, hashes: list[str]) -> Iterator[bytes]:
+    """The bytes of each object, in order, read a batch at a time."""
+    for start in range(0, len(hashes), BATCH):
+        batch = hashes[start : start + BATCH]
+        out = git(
+            clone, "cat-file", "--batch", data="".join(f"{o}\n" for o in batch).encode()
+        )
+        at = 0
+        for _ in batch:
+            end = out.index(b"\n", at)
+            size = int(out[at:end].split()[2])
+            yield out[end + 1 : end + 1 + size]
+            at = end + 2 + size
