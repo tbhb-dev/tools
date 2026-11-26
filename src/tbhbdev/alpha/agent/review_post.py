@@ -166,13 +166,15 @@ def stamp(run: Run) -> str:
         if request.harness is Harness.AGY
         else request.harness.value
     )
-    value = agent_identity.format_value(
-        {
-            "effort": request.effort,
-            "harness": agent_identity.SLUGS[key],
-            "model": request.model,
-        }
+    model, effort = agent_identity.model_effort(key, request.model, request.effort)
+    ident = agent_identity.Ident(
+        root="",
+        harness=agent_identity.SLUGS[key],
+        model=model,
+        effort=effort,
+        surface=agent_identity.surface_ok(request.kind.value),
     )
+    value = agent_identity.format_value(ident.attrs())
     if why := agent_identity.check_value(value):
         message = f"invalid LLM trailer: {why}"
         raise PostRefusedError(message)

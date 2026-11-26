@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:bdcb4be378cfbd90
-    at: "2026-11-26T14:54:21Z"
+    session: sha-256-64:0f9b0c878a9f9448
+    at: "2026-11-26T15:06:00Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -49,6 +49,6 @@ Before an approval it reads the pull request head once and refuses if the head d
 A request for changes requires non-empty findings.
 Any 2xx answer counts as posted.
 The review body ends with a line giving the run name and the judged head, then a blank line and a `Generated-by` trailer.
-The host builds the trailer from its run request, which records the effort, harness and model.
+The host builds the trailer from its run request, using the commit hook's model and effort rules and the run kind (`exec` or `start`) as the surface.
 The request has no session ID, so the trailer omits it.
 An invalid trailer prevents posting.
