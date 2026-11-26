@@ -65,8 +65,9 @@ def parser(prog: str) -> argparse.ArgumentParser:
     )
     execute.add_argument(
         "--expect-commit",
-        action="store_true",
-        help="return status 6 if a successful build produced no new commit",
+        action=argparse.BooleanOptionalAction,
+        help="return status 6 when a successful build has no new commit; "
+        "use --no-expect-commit to let the Stop hook accept a clean build",
     )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")

@@ -167,7 +167,8 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         fetch_refs=tuple(args.fetch_ref),
         start_ref=args.start_ref,
         max_concurrent_runs=host.max_concurrent_runs,
-        expect_commit=args.expect_commit,
+        expect_commit=bool(args.expect_commit),
+        no_commit=args.expect_commit is False,
     )
     request.check_start_ref(run)
     run = rules.check(

@@ -1,13 +1,12 @@
 ---
 description: Drafting, checking, posting, and responding to pull request reviews.
 generated:
-  - role: assisted
+  - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:621ba09362617ce8
-    at: "2026-11-25T20:45:00Z"
+    session: sha-256-64:1a6d4168da557dcf
+    at: "2026-11-26T01:58:42Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -42,6 +41,6 @@ The schema 2 prompt renderer uses four templates. Tier 1 uses `tier-1.txt` for t
 
 For a re-review, `delta.txt` supplies the previously reviewed head as Base-reviewed. The reviewer judges changes between that head and the new head, records what changed, and keeps unresolved findings by reference. The renderer can also return the schema 2 draft skeleton on its own.
 
-A review run ends its final message with the `VERDICT` line naming the verdict and full reviewed head, and the review document retains schema 2.
+A review run ends its final message with `VERDICT: GO` or `VERDICT: BLOCK` followed by the full reviewed head. The review document retains schema 2.
 
 Every prompt includes the correctness (C), security (S), tests and coverage (T), docs (D), and scope (P) checklists. Each question has a stable numbered ID such as C1 or S1. The review floor retains its R and FE IDs.

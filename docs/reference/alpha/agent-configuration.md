@@ -5,8 +5,8 @@ generated:
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     surface: exec
-    session: sha-256-64:87816a4d23273d34
-    at: "2026-11-26T00:22:07Z"
+    session: sha-256-64:1a6d4168da557dcf
+    at: "2026-11-26T01:58:42Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -22,6 +22,8 @@ type: Reference
 The launcher warns when the prompt mentions a ref that no `--fetch-ref` option covers.
 
 `agent exec --expect-commit` requires a new commit from a build run. If the run would otherwise succeed and the host records no new commit, it returns exit status 6 and logs `no new commit: the brief expected one (--expect-commit)`. The launcher refuses this flag for the review profile.
+
+The Stop hook checks the run worktree for uncommitted tracked changes and the run branch for a commit past its starting point. Use `agent exec --no-expect-commit` for a build that can finish without a new commit. The worktree still has to be clean of tracked changes. For reviews, the hook requires a standalone `VERDICT: GO` or `VERDICT: BLOCK` line in the final reply, with an optional full commit SHA. The hook asks the model to continue up to three times per run, then allows the stop and logs the reason.
 
 Pass `--ref <full sha>` to launch a review and include `--reason` when you use Claude.
 
@@ -63,7 +65,7 @@ The run clone has its own copy of the mirror's object store. The mirror never pr
 
 Every `agent exec` run has the agent account’s full access. The account supplies the boundary for Codex, Claude and agy, for both build and review profiles. Runs skip sandbox grants, denied-path overlap checks, executable trust checks and write-root audits. The launcher offers no sandboxed mode.
 
-Claude runs load user settings and the run’s generated settings. They ignore project settings and use only server configuration supplied for the run. The generated settings turn off hooks and the sandbox. Claude uses `bypassPermissions`. Codex marks each run clone as untrusted, which skips its project configuration.
+`tbhbdev alpha install` registers Stop alongside the other user-level hooks for Claude, Codex, and Antigravity. Headless Claude runs use their generated settings with the Stop hook enabled and skip user and project settings. Headless Codex runs install and trust the Stop hook in their private configuration. Codex marks each run clone as untrusted, which skips its project configuration. Antigravity runs use the installed user-level Stop hook.
 
 Run-host records phase `unknown` when it can't prove the group stopped. It keeps the harness exit status and appends cleanup messages to the existing log.
 
