@@ -11,6 +11,7 @@ import json
 import shlex
 import tomllib
 from pathlib import Path, PurePosixPath
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -147,7 +148,8 @@ def claude_settings_of(profile: Profile) -> dict[str, object]:
 def claude_settings(profile: Profile, *, headless: bool) -> str:
     options = claude_settings_of(profile)
     if headless:
-        hooks = {**options["hooks"], **install.stop_hooks("claude")}
+        own = cast("dict[str, object]", options["hooks"])
+        hooks = {**own, **install.stop_hooks("claude")}
         options.update(disableAllHooks=False, hooks=hooks)
     return json.dumps(options, separators=(",", ":"), sort_keys=True)
 

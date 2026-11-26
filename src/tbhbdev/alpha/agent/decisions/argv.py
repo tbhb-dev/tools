@@ -14,6 +14,7 @@ import shutil
 import socket
 import sys
 from pathlib import Path
+from typing import cast
 
 from tbhbdev.alpha.agent.decisions import policy as policy_module
 from tbhbdev.alpha.agent.model import (
@@ -254,7 +255,8 @@ def _claude(
     options = detail.settings
     if headless:
         # Keep the policy's own hooks (the agent-model guard) beside Stop.
-        hooks = {**dict(options.get("hooks", {})), **stop_hooks("claude")}
+        own = cast("dict[str, object]", options.get("hooks", {}))
+        hooks = {**own, **stop_hooks("claude")}
         options = options | {"disableAllHooks": False, "hooks": hooks}
     settings = json.dumps(options, separators=(",", ":"), sort_keys=True)
     argv = ["claude", *(["-p"] if headless else [])]

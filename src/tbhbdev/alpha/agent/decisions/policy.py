@@ -234,9 +234,11 @@ def _guard_hooks(command: str) -> dict[str, object]:
     """The settings' only hook: refuse an Agent launch that names no model.
 
     A launch may name any model. Hooks stay on for this, so the user's own
-    hooks load too.
+    hooks load too. `onFailure: "block"` makes a guard that cannot run (a
+    missing binary, a timeout, a crash) refuse the launch instead of
+    letting it through.
     """
-    handler = {"type": "command", "command": command}
+    handler = {"type": "command", "command": command, "onFailure": "block"}
     return {"PreToolUse": [{"matcher": "Agent", "hooks": [handler]}]}
 
 

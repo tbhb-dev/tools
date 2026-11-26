@@ -76,7 +76,11 @@ def made(  # noqa: PLR0913 -- one value per fact the policy depends on
 
 
 def guard_hooks(program: str) -> dict[str, object]:
-    handler = {"type": "command", "command": f"{program} alpha guard-agent-model"}
+    handler = {
+        "type": "command",
+        "command": f"{program} alpha guard-agent-model",
+        "onFailure": "block",
+    }
     return {"PreToolUse": [{"matcher": "Agent", "hooks": [handler]}]}
 
 
@@ -1828,6 +1832,18 @@ def test_claude_guards_agent_launches_and_pins_no_model(
     permissions = value.get("permissions", {})
     assert isinstance(permissions, dict)
     assert "Agent" not in permissions.get("deny", [])
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_guard_blocks_when_it_cannot_run(
+    profile: Profile, *, unsandboxed: bool
+) -> None:
+    """A guard that fails to start, times out or crashes must refuse the launch."""
+    result = made(Os.LINUX, profile, Harness.CLAUDE, "agent", unsandboxed=unsandboxed)
+    groups = dig(claude_settings_of(result), "hooks", "PreToolUse")
+    assert groups == guard_hooks("/example/home/agent/.local/bin/tbhbdev")["PreToolUse"]
+    assert "'onFailure': 'block'" in str(groups)
 
 
 @pytest.mark.parametrize("unsandboxed", [False, True])
