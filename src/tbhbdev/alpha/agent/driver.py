@@ -340,7 +340,7 @@ def checked_prompt(args: argparse.Namespace) -> str:
     problems = brief.check_hooks(prompt)
     problems.extend(
         rules.prompt_launch_problems(
-            prompt, Profile(args.profile), args.fetch_ref, args.start_ref
+            prompt, Profile(args.profile), args.fetch_ref, args.start_ref, args.name
         )
     )
     if problems:

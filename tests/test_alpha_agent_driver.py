@@ -1160,13 +1160,101 @@ def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
 
 
 @pytest.mark.parametrize(
-    "prompt", ["Create branch `agent/other`.", "The earlier PR was on `agent/other`."]
+    "instruction",
+    [
+        "git checkout -b feat/4-exporter",
+        "git checkout -B feat/4-exporter",
+        "git checkout feat/4-exporter",
+        "git switch feat/4-exporter",
+        "git switch -c feat/4-exporter",
+        "git switch -C feat/4-exporter",
+        "git branch feat/4-exporter",
+        "git worktree add .worktrees/exporter -b feat/4-exporter",
+        "work on branch feat/4-exporter",
+        "create branch feat/4-exporter",
+        "Switch to the branch named `feat/4-exporter`.",
+        "Check out branch 'feat/4-exporter'.",
+        'Commit on a branch "feat/4-exporter".',
+        "Work on\nbranch feat/4-exporter",
+        "Work on branch agent/sample. Then create branch feat/4-exporter.",
+    ],
 )
+def test_build_branch_instructions_refuse_before_any_host_work(
+    remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str
+) -> None:
+    remote.prompt.write_text(instruction)
+    assert launch(remote, "--ignore-limits") == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            f"example agent: {remote.prompt}: "
+            "the brief asks to create or switch to branch feat/4-exporter; "
+            "the driver owns the build branch. Use agent/sample\n"
+        ),
+    )
+    assert remote.records("ssh", limits=True) == []
+    assert remote.records("tmux") == []
+    assert not driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Diff against branch feat/4-exporter.",
+        "Base branch feat/4-exporter.",
+        "Diff against branch agent/other.",
+        "Base branch agent/other.",
+        "Never create branch feat/4-exporter.",
+        "Do not\nswitch to branch feat/4-exporter.",
+        "git checkout -- README.md",
+        "git branch --show-current",
+        "git switch agent/sample",
+        "Work on branch agent/sample.",
+        "Create branch refs/heads/agent/sample.",
+    ],
+)
+def test_build_allows_reading_branches_and_its_driver_branch(
+    remote: Remote, prompt: str
+) -> None:
+    remote.prompt.write_text(prompt)
+    assert launch(remote) == 0
+    assert driver.metadata_path("sample").is_file()
+    assert (remote.state / "sample.prompt").read_text() == prompt
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "git checkout -b feat/4-exporter",
+        "git switch feat/4-exporter",
+        "Work on branch feat/4-exporter.",
+        "Create branch agent/other.",
+    ],
+)
+def test_review_branch_instructions_still_launch(remote: Remote, prompt: str) -> None:
+    remote.prompt.write_text(prompt)
+    assert launch(remote, "--profile", "review", "--ref", COMMIT) == 0
+    assert driver.metadata_path("sample").is_file()
+    assert (remote.state / "sample.prompt").read_text() == prompt
+
+
+def test_start_ref_does_not_allow_switching_away_from_driver_branch(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote.prompt.write_text("git switch agent/other")
+    ref = "refs/heads/agent/other"
+    assert launch(remote, "--fetch-ref", ref, "--start-ref", ref) == 1
+    assert "the driver owns the build branch. Use agent/sample" in (
+        capsys.readouterr().err
+    )
+    assert remote.records("ssh", limits=True) == []
+
+
 def test_prompt_with_foreign_branch_warns_and_launches(
-    remote: Remote, capsys: pytest.CaptureFixture[str], prompt: str
+    remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_standalone_fake(remote.bin / "tmux", BODY.replace("sample", "sample-run"))
-    remote.prompt.write_text(prompt)
+    remote.prompt.write_text("The earlier PR was on `agent/other`.")
     args = arguments(remote)
     args[-2] = "sample-run"
     assert agent.main(args, "example agent") == 0

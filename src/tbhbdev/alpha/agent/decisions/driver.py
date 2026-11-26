@@ -64,10 +64,40 @@ def _unfetched_explicit_refs(
     return [ref for ref in dict.fromkeys(explicit) if ref not in fetch_refs]
 
 
+def prompt_branch_problems(prompt: str, run: str) -> list[str]:
+    """Refuse the first foreign branch instruction using the brief's text matcher."""
+    prose = "\n".join(
+        " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
+    )
+    allowed = f"agent/{run}"
+    for match in brief.BRANCH_INSTRUCTION.finditer(prose):
+        branch = match[1].rstrip(".,")
+        if branch.startswith("-") or brief.prohibiting(prose, match.start()):
+            continue
+        if branch.removeprefix("refs/heads/") != allowed:
+            return [
+                (
+                    f"the brief asks to create or switch to branch {branch}; "
+                    f"the driver owns the build branch. Use {allowed}"
+                )
+            ]
+    return []
+
+
 def prompt_launch_problems(
-    prompt: str, profile: Profile, fetch_refs: list[str], start_ref: str | None
+    prompt: str,
+    profile: Profile,
+    fetch_refs: list[str],
+    start_ref: str | None,
+    run: str,
 ) -> list[str]:
     """Check explicit ref uses and branch update instructions in a launch brief."""
+    if profile is Profile.BUILD:
+        branch_problems = prompt_branch_problems(prompt, run)
+        if branch_problems:
+            return branch_problems
+        # The driver creates this branch; it doesn't need fetching.
+        fetch_refs = [*fetch_refs, f"refs/heads/agent/{run}"]
     # Fold line wraps within a paragraph without changing ref case.
     prose = "\n".join(
         " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
