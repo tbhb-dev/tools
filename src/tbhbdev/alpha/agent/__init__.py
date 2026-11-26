@@ -65,8 +65,8 @@ def parser(prog: str) -> argparse.ArgumentParser:
     )
     execute.add_argument(
         "--expect-commit",
-        action="store_true",
-        help="return status 6 if a successful build produced no new commit",
+        action=argparse.BooleanOptionalAction,
+        help="require a new commit and a push (default for builds)",
     )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")

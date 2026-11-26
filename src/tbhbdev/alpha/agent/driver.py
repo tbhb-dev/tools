@@ -134,6 +134,10 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     host = rules.select_host(settings, args.host, args.account)
     harness = Harness(args.harness)
     profile = Profile(args.profile)
+    expect_commit = args.expect_commit
+    if profile is Profile.REVIEW and expect_commit is not None:
+        message = "request expect_commit applies only to a build run"
+        raise Invalid(message)
     reviewer = launch_rules.is_reviewer(args.role, profile)
     if args.worker_workflow and not reviewer:
         message = "--worker-workflow applies to reviewer-role runs only"
@@ -167,11 +171,17 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         fetch_refs=tuple(args.fetch_ref),
         start_ref=args.start_ref,
         max_concurrent_runs=host.max_concurrent_runs,
-        expect_commit=args.expect_commit,
+        expect_commit=profile is Profile.BUILD
+        if expect_commit is None
+        else expect_commit,
     )
     request.check_start_ref(run)
     run = rules.check(
-        run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()
+        run,
+        settings,
+        host,
+        existing_name=args.name if metadata_path(args.name).exists() else None,
+        ref=args.ref,
     )
     result = Run(
         args.name,
@@ -275,7 +285,10 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
             message = (
                 f"{run.name}: run {other.name} already reviews "
                 f"{run.request.repo}@{run.request.commit} with the "
-                f"{run.request.profile.value} profile and hasn't ended"
+                f"{run.request.profile.value} profile and hasn't ended. "
+                f"Check `tbhbdev alpha agent status {other.name}` and use "
+                f"`tbhbdev alpha agent clean {other.name}` once it ends. "
+                "For concurrent reviewers, launch both with distinct --variant values"
             )
             raise Invalid(message)
 
@@ -324,11 +337,18 @@ def checked_prompt(args: argparse.Namespace) -> str:
         message = f"{args.prompt_file}: brief is empty after the driver restarted"
         raise Invalid(message)
     problems = brief.check_hooks(prompt)
+    problems.extend(
+        rules.prompt_launch_problems(
+            prompt, Profile(args.profile), args.fetch_ref, args.start_ref
+        )
+    )
     if problems:
         telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
         message = "\n".join(f"{args.prompt_file}: {problem}" for problem in problems)
         raise Invalid(message)
-    for warning in brief.branch_warnings(prompt, run=args.name):
+    for warning in brief.branch_warnings(
+        prompt, run=args.name, fetch_refs=tuple(args.fetch_ref)
+    ):
         print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
     for ref in rules.unfetched_prompt_refs(prompt, args.fetch_ref):
         print(

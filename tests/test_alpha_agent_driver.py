@@ -105,7 +105,7 @@ def test_exec_help_describes_expected_commits(
     assert agent.main(["exec", "--help"], "example agent") == 0
     help_text = " ".join(capsys.readouterr().out.split())
     assert (
-        "--expect-commit return status 6 if a successful build produced no new commit"
+        "--expect-commit, --no-expect-commit require a new commit and a push"
         in help_text
     )
 
@@ -252,7 +252,6 @@ def test_launch_stream_and_metadata(
             "one",
             "--role",
             "worker",
-            "--expect-commit",
             "--fetch-ref",
             "refs/pull/391/head",
             "--fetch-ref",
@@ -359,7 +358,10 @@ def test_reused_name(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None
     assert launch(remote) == 0
     before = remote.records("ssh")
     assert launch(remote) == 1
-    assert "clean first" in capsys.readouterr().err
+    assert (
+        "run metadata already exists. Run `tbhbdev alpha agent clean sample`"
+        in capsys.readouterr().err
+    )
     assert remote.records("ssh") == before
 
 
@@ -412,7 +414,10 @@ def test_a_second_live_review_of_the_same_commit_is_refused(remote: Remote) -> N
         driver.refuse_live_duplicate(CONFIG, second)
     assert str(info.value) == (
         f"second: run sample already reviews example-org/example-repo@{COMMIT} "
-        "with the review profile and hasn't ended"
+        "with the review profile and hasn't ended. "
+        "Check `tbhbdev alpha agent status sample` and use "
+        "`tbhbdev alpha agent clean sample` once it ends. "
+        "For concurrent reviewers, launch both with distinct --variant values"
     )
 
 
@@ -635,16 +640,26 @@ def test_a_different_role_or_class_alone_is_still_a_duplicate(
         driver.refuse_live_duplicate(CONFIG, second)
 
 
-def test_exec_refuses_expect_commit_on_a_review(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("flag", ["--expect-commit", "--no-expect-commit"])
+def test_exec_refuses_commit_flags_on_a_review(
+    remote: Remote, capsys: pytest.CaptureFixture[str], flag: str
 ) -> None:
-    assert (
-        launch(remote, "--profile", "review", "--ref", COMMIT, "--expect-commit") == 1
-    )
+    assert launch(remote, "--profile", "review", "--ref", COMMIT, flag) == 1
     assert (
         "request expect_commit applies only to a build run" in capsys.readouterr().err
     )
     assert remote.records("ssh") == []
+
+
+@pytest.mark.parametrize(
+    ("flag", "required"), [("--expect-commit", True), ("--no-expect-commit", False)]
+)
+def test_exec_accepts_explicit_commit_policy(
+    remote: Remote, flag: str, *, required: bool
+) -> None:
+    assert launch(remote, flag) == 0
+    data = json.loads((remote.state / "sample.request.json").read_text())
+    assert data["expect_commit"] is required
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
@@ -883,7 +898,9 @@ def test_status_reports_an_unreachable_host_with_the_local_record(
         (4, "push refused: the draft is committed"),
         (5, "pr not opened: no draft"),
         (4, "commit check failed: cannot check new commits (TimeoutExpired)"),
-        (6, "no new commit: the brief expected one (--expect-commit)"),
+        (6, "no new commit: the build required one (--expect-commit)"),
+        (9, "push failed: no new tip for agent/sample on origin"),
+        (10, "review not posted: the pull request head moved since the run judged it"),
     ],
 )
 def test_status_shows_the_last_publication_reason(
@@ -1141,11 +1158,14 @@ def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
     assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
 
 
+@pytest.mark.parametrize(
+    "prompt", ["Create branch `agent/other`.", "The earlier PR was on `agent/other`."]
+)
 def test_prompt_with_foreign_branch_warns_and_launches(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+    remote: Remote, capsys: pytest.CaptureFixture[str], prompt: str
 ) -> None:
     write_standalone_fake(remote.bin / "tmux", BODY.replace("sample", "sample-run"))
-    remote.prompt.write_text("Create branch `agent/other`.\n")
+    remote.prompt.write_text(prompt)
     args = arguments(remote)
     args[-2] = "sample-run"
     assert agent.main(args, "example agent") == 0
@@ -1159,20 +1179,20 @@ def test_prompt_with_foreign_branch_warns_and_launches(
 @pytest.mark.parametrize(
     ("prompt", "options", "unfetched"),
     [
-        ("Use `refs/pull/5/head`.", (), ("refs/pull/5/head",)),
         ("Use `refs/pull/5/head`.", ("--fetch-ref", "refs/pull/5/head"), ()),
+        ("Use `agent/other`.", ("--fetch-ref", "refs/heads/agent/other"), ()),
         (
-            (
-                "See (refs/pull/5/head); refs/heads/foo/bar-1.x, and "
-                "refs/heads/Release_2... Reuse refs/pull/5/head."
-            ),
+            ("See refs/heads/foo/bar-1.x, and refs/heads/Release_2..."),
             (),
-            ("refs/pull/5/head", "refs/heads/foo/bar-1.x", "refs/heads/Release_2"),
+            ("refs/heads/foo/bar-1.x", "refs/heads/Release_2"),
         ),
         ("Read the README.", (), ()),
         ("See refs/tags/x or refs/pull/abc/head.", (), ()),
         (
-            "See refs/pull/5/heads, refs/pull/5/head.old or refs/pull/5/head/old.",
+            (
+                "See refs/pull/5/heads, refs/pull/5/head.old, refs/pull/5/head/old, "
+                "refs/pull/5/head~2, or origin/refs/pull/5/head."
+            ),
             (),
             (),
         ),
@@ -1195,6 +1215,71 @@ def test_prompt_warns_about_unfetched_refs_and_launches(
             for ref in unfetched
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "options", "ref"),
+    [
+        ("See (refs/pull/5/head); reuse refs/pull/5/head.", (), "refs/pull/5/head"),
+        ("Use refs/heads/agent/topic.", (), "refs/heads/agent/topic"),
+        (
+            "Use `agent/Topic`.",
+            ("--fetch-ref", "refs/heads/agent/topic"),
+            "refs/heads/agent/Topic",
+        ),
+        (
+            "Use agent/topic.x.",
+            ("--fetch-ref", "refs/heads/agent/topic"),
+            "refs/heads/agent/topic.x",
+        ),
+    ],
+)
+def test_prompt_refuses_unfetched_exact_refs_before_ssh(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    prompt: str,
+    options: tuple[str, ...],
+    ref: str,
+) -> None:
+    remote.prompt.write_text(prompt)
+    assert launch(remote, *options) == 1
+    assert capsys.readouterr().err == (
+        f"example agent: {remote.prompt}: the brief names {ref}. "
+        f"Add `--fetch-ref {ref}`\n"
+    )
+    assert remote.records("ssh") == []
+    assert not driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(
+    ("prompt", "target"),
+    [
+        ("Update the existing PR\nbranch.", "<branch>"),
+        ("Push commits to `agent/topic`.", "agent/topic"),
+        ("Run `git push origin HEAD:refs/heads/agent/topic`.", "agent/topic"),
+    ],
+)
+def test_build_prompt_that_updates_a_pr_branch_needs_start_ref(
+    remote: Remote, capsys: pytest.CaptureFixture[str], prompt: str, target: str
+) -> None:
+    remote.prompt.write_text(prompt)
+    assert launch(remote, "--fetch-ref", "refs/heads/agent/topic") == 1
+    ref = f"refs/heads/{target}"
+    assert capsys.readouterr().err == (
+        f"example agent: {remote.prompt}: the brief asks to update a PR branch. "
+        f"Use `--fetch-ref {ref} --start-ref {ref}`\n"
+    )
+    assert remote.records("ssh") == []
+    assert not driver.metadata_path("sample").exists()
+
+
+def test_build_prompt_that_updates_a_pr_branch_with_start_ref_launches(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote.prompt.write_text("Update `agent/topic`.\n")
+    ref = "refs/heads/agent/topic"
+    assert launch(remote, "--fetch-ref", ref, "--start-ref", ref) == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_metadata_round_trip_and_exclusive_create(remote: Remote) -> None:
@@ -1800,7 +1885,10 @@ def test_clean_allows_name_reuse(remote: Remote) -> None:
     remote.file(".run.lock", "")
     remote.file(".rc", "0\n")
     remote.configure(session=False)
+    for suffix in (".branch", ".pr", ".head"):
+        remote.file(suffix, "previous run\n")
     assert command("clean") == 0
+    assert not list(remote.state.glob("sample.*"))
     assert launch(remote) == 0
 
 

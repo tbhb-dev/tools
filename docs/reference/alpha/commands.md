@@ -5,7 +5,8 @@ generated:
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     surface: exec
-    at: "2026-11-26T01:43:22Z"
+    session: sha-256-64:6e402d15023f0de1
+    at: "2026-11-26T01:38:57Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -101,6 +102,8 @@ When `tbhbdev alpha agent exec` finds a version mismatch, it looks up the head o
 `tbhbdev alpha agent exec --fetch-ref REF` makes `refs/heads/<branch>` available as `origin/fetched/heads/<branch>` and `refs/pull/N/head` as `origin/fetched/pull/N/head`. Repeat `--fetch-ref` up to eight times with either profile.
 
 `tbhbdev alpha agent exec --worker-workflow ID` launches a review as the registered worker `worker/ID` when no tmux pane names the caller. See [Agent configuration](agent-configuration.md) for the `[agent.worker]` table that registers it.
+
+Build runs expect a new commit and an updated origin branch by default. Pass `--no-expect-commit` for a research run that can finish without committing or pushing. After a successful harness exit, `agent wait` returns 6 for a missing commit, 9 for an unchanged or unverifiable run branch on origin, and 10 for a review that the host did not post. Use `agent status NAME` to see the reason.
 
 For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
 
