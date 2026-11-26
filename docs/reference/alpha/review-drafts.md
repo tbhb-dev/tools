@@ -42,6 +42,6 @@ The schema 2 prompt renderer uses four templates. Tier 1 uses `tier-1.txt` for t
 
 For a re-review, `delta.txt` supplies the previously reviewed head as Base-reviewed. The reviewer judges changes between that head and the new head, records what changed, and keeps unresolved findings by reference. The renderer can also return the schema 2 draft skeleton on its own.
 
-A review run ends its final message with the `VERDICT` line naming the verdict and full reviewed head, and the review document retains schema 2.
+A review run ends its final message with a `VERDICT: GO`, `VERDICT: BLOCK` or `VERDICT: NO-GO` line, optionally followed by the full reviewed head (the prompt asks for it), and the review document retains schema 2.
 
 Every prompt includes the correctness (C), security (S), tests and coverage (T), docs (D), and scope (P) checklists. Each question has a stable numbered ID such as C1 or S1. The review floor retains its R and FE IDs.

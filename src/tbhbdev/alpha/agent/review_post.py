@@ -16,11 +16,13 @@ import httpx
 from tbhbdev.alpha import pull_request, review
 from tbhbdev.alpha.agent import credentials, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.model import RunKind
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
 ALLOWED_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
+VERDICTS = frozenset({"GO", "BLOCK", "NO-GO"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
@@ -160,12 +162,40 @@ def stamp(run: Run) -> str:
     )
 
 
+def check_verdict(run: Run) -> None:
+    """Require a final `VERDICT: GO|BLOCK|NO-GO` line, with the run's sha if any."""
+    for suffix in ("out.final", "out"):
+        try:
+            answer = runfiles.read_owned(
+                run.files.path(suffix), 16 * 1024 * 1024, "review output"
+            )
+        except FileNotFoundError:
+            continue
+        label, _, rest = answer.rstrip().rpartition("\n")[2].partition(" ")
+        verdict, _, sha = rest.partition(" ")
+        if (
+            label == "VERDICT:"
+            and verdict in VERDICTS
+            and (not sha or sha == run.request.commit)
+        ):
+            return
+        break
+    message = "no verdict line at the end of the final answer, or it names another head"
+    raise PostRefusedError(message)
+
+
 def posted(run: Run, prepared: Prepared) -> bool:
-    """Post the run's review and record it; False when it was not posted."""
+    """Ensure the run's review is posted and recorded."""
     if run.files.path("review").exists():
-        return False
+        return True
     workspace = Path(prepared.paths.worktree)
     try:
+        # A supplied output schema defines the final answer's format.
+        if (
+            run.request.kind is RunKind.EXEC
+            and not run.files.path("schema.json").is_file()
+        ):
+            check_verdict(run)
         number, text = find_draft(workspace)
         token = credentials.review_post_token(run.request, run.settings)
         if token is None:

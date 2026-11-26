@@ -241,7 +241,7 @@ elif test -f {output}; then tail -c 65536 {output}; fi
             + f"""safe_file {log}
 if test -f {log}; then
     awk '/^(push (skipped|refused|failed):|pr not opened:)/ ||
-         /^(commit check failed:|no new commit:)/ {{
+         /^(commit check failed:|no new commit:|review not posted:)/ {{
              last = $0
          }}
          END {{ if (last != "") print substr(last, 1, 4096) }}' {log}

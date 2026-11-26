@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -21,6 +22,8 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import httpx
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
@@ -101,6 +104,9 @@ def planned_paths(run: Run) -> RunPaths:
 _BAZEL_SHUTDOWN_SECONDS = 60
 _BAZEL_SHUTDOWN_RETRIES = 3
 _BAZEL_RETRY_SECONDS = 2
+NO_COMMIT = 6
+NO_PUSH = 9
+NO_REVIEW = 10
 _STARTUP_FILES = (
     ".zshenv",
     ".zshrc",
@@ -813,16 +819,7 @@ def _execute(
         if preflight_only:
             rc = run_harness(run, prepared, stack, preflight_only=True)
         else:
-            if push_token is None and run.request.start_ref is not None:
-                push_token = credentials.push_token(run.request, run.settings)
-            rc = push.run(run, prepared, stack, run_harness, push_token)
-            rc = require_commit(run, rc)
-            if (
-                rc == 0
-                and run.request.profile is Profile.REVIEW
-                and not run.files.uncertain
-            ):
-                post_review(run, prepared)
+            rc = run_and_publish(run, prepared, stack, push_token)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -839,23 +836,81 @@ def _execute(
     return rc
 
 
-def post_review(run: Run, prepared: Prepared) -> None:
+def run_and_publish(
+    run: Run,
+    prepared: Prepared,
+    stack: ExitStack,
+    token: str | credentials.PushTokenFailure | None,
+) -> int:
+    start_ref = run.request.start_ref
+    if token is None and start_ref is not None:
+        token = credentials.push_token(run.request, run.settings)
+    before = (
+        origin_tip(run) if run.request.expect_commit and start_ref is None else None
+    )
+    rc = push.run(run, prepared, stack, run_harness, token)
+    if rc == 0 and run.request.profile is Profile.REVIEW:
+        return post_review(run, prepared)
+    return require_commit(run, rc, before)
+
+
+def post_review(run: Run, prepared: Prepared) -> int:
+    if run.files.uncertain:
+        run.files.write("log", "review not posted: harness shutdown unconfirmed\n")
+        return NO_REVIEW
     try:
-        review_post.posted(run, prepared)
+        return 0 if review_post.posted(run, prepared) else NO_REVIEW
     except RunInterruptedError:
         # A signal during posting follows the run interrupt path and records 143.
         raise
-    except Exception as exc:  # noqa: BLE001 -- posting cannot replace the harness result.
-        run.files.write("log", f"review post failed: {type(exc).__name__}\n")
+    except Exception as exc:  # noqa: BLE001 -- record posting failures safely.
+        run.files.write("log", f"review not posted: {type(exc).__name__}\n")
+        return NO_REVIEW
 
 
-def require_commit(run: Run, rc: int) -> int:
-    if rc == 0 and run.request.expect_commit and not run.files.path("head").exists():
+def origin_tip(run: Run) -> str | None:
+    """Read the exact branch from origin. Empty means absent, None unreadable."""
+    _, owner, repository = repo.parts(run.request.repo)
+    branch = f"heads/agent/{run.files.name}"
+    url = f"https://api.github.com/repos/{owner}/{repository}/git/ref/{branch}"
+    headers = {"Accept": "application/vnd.github+json"}
+    try:
+        token = credentials.fetch_token(run.request, run.settings)
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        response = httpx.get(url, headers=headers, timeout=20)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return ""
+        response.raise_for_status()
+        record = response.json()
+    except OSError, ValueError, httpx.HTTPError:
+        return None
+    if not isinstance(record, dict) or record.get("ref") != f"refs/{branch}":
+        return None
+    target = record.get("object")
+    tip = target.get("sha") if isinstance(target, dict) else None
+    return tip if isinstance(tip, str) and re.fullmatch(r"[0-9a-f]{40}", tip) else None
+
+
+def require_commit(run: Run, rc: int, before: str | None) -> int:
+    if rc or not run.request.expect_commit:
+        return rc
+    if not run.files.path("head").exists():
         run.files.write(
-            "log", "no new commit: the brief expected one (--expect-commit)\n"
+            "log", "no new commit: the build required one (--expect-commit)\n"
         )
-        return 6
-    return rc
+        return NO_COMMIT
+    if run.request.start_ref is not None:
+        return 0
+    after = origin_tip(run) if before is not None else None
+    branch = f"agent/{run.files.name}"
+    if after is None:
+        run.files.write("log", f"push failed: cannot verify {branch} on origin\n")
+    elif not after or before == after:
+        run.files.write("log", f"push failed: no new tip for {branch} on origin\n")
+    else:
+        return 0
+    return NO_PUSH
 
 
 def recover_auth(run: Run, destination: Path) -> Path:
