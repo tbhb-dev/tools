@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -241,7 +242,12 @@ def post_draft(number: int, author: str | None) -> int:
             message = f"draft repo {doc.repo} differs from origin repo {repo}"
             raise review_doc.ReviewError(message)
         api = GhApi()
-        status, review_id = review_doc.post(api, doc, author=author or api_author(api))
+        status, review_id = review_doc.post(
+            api,
+            doc,
+            author=author or api_author(api),
+            identity_value=pr.posting_value(os.environ),
+        )
     except (OSError, SystemExit, ValueError) as exc:
         for problem in str(exc).splitlines():
             print(f"{path}: {problem}", file=sys.stderr)

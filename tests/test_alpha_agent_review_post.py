@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, cast
 import httpx
 import pytest
 
+from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
-from tbhbdev.alpha.agent.model import Profile, RunKind
+from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,8 +44,9 @@ def make(
     request = SimpleNamespace(
         repo="github.com/o/r",
         commit=HEAD,
-        harness=SimpleNamespace(value="codex"),
+        harness=Harness.CODEX,
         model="m1",
+        effort="high",
         profile=Profile.REVIEW,
         kind=RunKind.EXEC,
     )
@@ -73,7 +75,7 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
 
 
 BASE = "https://api.github.com/repos/o/r/pulls/7"
-STAMP = f"Run r1, codex m1, judged head {HEAD}."
+STAMP = f"Run r1, judged head {HEAD}."
 
 
 class Api:
@@ -128,8 +130,46 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert payload["event"] == event
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Verdict")
-    assert payload["body"].endswith(f"\n---\n{STAMP}\n")
+    body, trailer = payload["body"].rstrip("\n").rsplit("\n\n", 1)
+    assert body.endswith(f"\n\n{STAMP}")
+    key, value = trailer.split(": ", 1)
+    assert key == agent_identity.KEY_GEN
+    assert value == "LLM effort=high;harness=codex;model=m1"
+    assert agent_identity.check_value(value) is None
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
+
+
+@pytest.mark.parametrize(
+    ("harness", "slug"), [(Harness.CLAUDE, "claude-code"), (Harness.AGY, "antigravity")]
+)
+def test_missing_session_is_omitted_even_when_the_agent_claims_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, slug: str
+) -> None:
+    text = draft() + "\nClaimed session `sha-256-64:0123456789abcdef`.\n"
+    run, prepared = make(tmp_path, text)
+    monkeypatch.setattr(run.request, "harness", harness)
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+    payload = api.calls[-1][2]
+    assert payload is not None
+    assert payload["body"].endswith(
+        f"Generated-by: LLM effort=high;harness={slug};model=m1\n"
+    )
+
+
+def test_invalid_identity_refuses_to_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = make(tmp_path, draft())
+    monkeypatch.setattr(run.request, "effort", "unknown")
+    monkeypatch.setattr(credentials, "review_post_token", forbidden)
+    monkeypatch.setattr(httpx, "request", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert (
+        "invalid LLM trailer: bad effort unknown" in run.files.path("log").read_text()
+    )
+    assert not run.files.path("review").exists()
 
 
 def test_a_run_name_posts_only_once(
