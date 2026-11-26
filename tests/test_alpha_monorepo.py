@@ -383,7 +383,9 @@ def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
     ) == ["ci.yaml:4: workflow uses an old repository"]
 
 
-@pytest.mark.parametrize("address", ["https://github.com/", "git@github.com:"])
+@pytest.mark.parametrize(
+    "address", ["https://github.com/", "ssh://git@github.com/", "git@github.com:"]
+)
 def test_references_detect_source_repository_names(address: str) -> None:
     data = f"git clone {address}tbhb-dev/ansible.git\n".encode()
     assert list(
@@ -615,7 +617,6 @@ def test_verify_accepts_rules_rewrites_to_monorepo_workflows(
     assert capsys.readouterr().out == "verify: 0 problems\n"
 
 
-@pytest.mark.parametrize("location", ["go.mod", "testdata/nested/go.mod"])
 @pytest.mark.parametrize(
     "module",
     [
@@ -625,21 +626,20 @@ def test_verify_accepts_rules_rewrites_to_monorepo_workflows(
     ],
 )
 def test_verify_accepts_modules_declared_in_the_imported_tree(
-    src: Src, mono: Path, capsys: Capsys, location: str, module: str
+    src: Src, mono: Path, capsys: Capsys, module: str
 ) -> None:
     path, _ = src
     (path / "go.mod").write_text("module go.example.dev/tools\n")
-    mod = path / location
+    mod = path / "testdata/nested/go.mod"
     mod.parent.mkdir(parents=True, exist_ok=True)
     mod.write_text(f"module {module}\n")
     (mod.parent / "main.go").write_text(f'import "{module}/pkg"\n')
     commit = commit_all(path)
     made = make_map((path, commit), mono.parent)
-    if location != "go.mod":
-        mapping = load(made.read_text())
-        del mapping.copy["go.mod"]
-        mapping.drop["go.mod"] = "module moved to the monorepo root"
-        made.write_text(dump(mapping))
+    mapping = load(made.read_text())
+    del mapping.copy["go.mod"]
+    mapping.drop["go.mod"] = "module moved to the monorepo root"
+    made.write_text(dump(mapping))
     assert run_import(f"{path}@{commit}", made, mono) == 0
     capsys.readouterr()
     assert verify_exit((path, commit), made, mono) == 0
@@ -670,24 +670,131 @@ def test_verify_rejects_old_module_imports_beside_local_fixtures(
     made.write_text(dump(mapping))
     assert run_import(f"{path}@{commit}", made, mono) == 0
     capsys.readouterr()
-    rule = (
-        "address of an old repository"
-        if module.startswith("github.com/")
-        else f"Go path {module}"
-    )
     assert Imported((path, commit), mono, made, capsys).problems() == [
-        f"{DEST}/testdata/nested/main.go:2: {rule}",
-        f"{DEST}/testdata/nested/main.go:3: {rule}",
+        f"{DEST}/testdata/nested/main.go:2: Go path {module}",
+        f"{DEST}/testdata/nested/main.go:3: Go path {module}",
         "verify: 2 problems",
     ]
+
+
+@pytest.mark.parametrize("rewrite", [False, True])
+def test_verify_rejects_old_go_path_even_with_copied_go_mod(
+    src: Src, mono: Path, capsys: Capsys, *, rewrite: bool
+) -> None:
+    path, _ = src
+    git(
+        path,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/tbhb-dev/agent-capacity",
+    )
+    old = "go.tbhb.dev/agent-capacity"
+    new = "github.com/tbhb-dev/tbhbdev/factory/agent-capacity"
+    (path / "go.mod").write_text(f"module {old}\n")
+    name = "cmd/agent-capacity/main.go"
+    (path / name).parent.mkdir(parents=True)
+    (path / name).write_text(f'package main\n\nimport (\n\t"{old}/internal/spool"\n)\n')
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    if rewrite:
+        mapping = load(made.read_text())
+        for file in ("go.mod", name):
+            mapping.rewrite[file] = Rewrite(mapping.copy.pop(file), [(old, new)])
+        made.write_text(dump(mapping))
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    if rewrite:
+        assert verify_exit((path, commit), made, mono) == 0
+        assert capsys.readouterr().out == "verify: 0 problems\n"
+    else:
+        assert Imported((path, commit), mono, made, capsys).problems() == [
+            f"{DEST}/{name}:4: Go path {old}",
+            f"{DEST}/go.mod:1: Go path {old}",
+            "verify: 2 problems",
+        ]
+
+
+def test_verify_rejects_bazel_dep_after_git_override_rewrite(
+    src: Src, mono: Path, capsys: Capsys
+) -> None:
+    path, _ = src
+    git(path, "remote", "set-url", "origin", "https://github.com/tbhb-dev/go.tbhb.dev")
+    override = (
+        'git_override(\n    module_name = "tbhb_rules",\n'
+        '    remote = "https://github.com/tbhb-dev/rules.git",\n)\n'
+    )
+    (path / "MODULE.bazel").write_text(
+        'module(name = "go_tbhb_dev")\n'
+        'bazel_dep(name = "tbhb_rules", version = "0.0.0", dev_dependency = True)\n'
+        + override
+        + "bazel_dep(\n    version = '0.0.0',\n    name = 'tbhb_rules_typescript',\n)\n"
+        'bazel_dep(name = "bazel_lib", repo_name = "tbhb_rules")\n'
+        'bazel_dep(name = "go_tbhb_dev_next")\n'
+        '# bazel_dep(name = "tbhb_rules")\n'
+    )
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    mapping = load(made.read_text())
+    del mapping.drop["MODULE.bazel"]
+    mapping.rewrite["MODULE.bazel"] = Rewrite(f"{DEST}/MODULE.bazel", [(override, "")])
+    made.write_text(dump(mapping))
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert Imported((path, commit), mono, made, capsys).problems() == [
+        f"{DEST}/MODULE.bazel:2: Bazel dependency from an old repository",
+        f"{DEST}/MODULE.bazel:3: Bazel dependency from an old repository",
+        "verify: 2 problems",
+    ]
+
+
+def test_verify_ignores_checkout_paths_and_urls_in_ansible_descriptions(
+    src: Src, mono: Path, capsys: Capsys
+) -> None:
+    path, _ = src
+    git(path, "remote", "set-url", "origin", "https://github.com/tbhb-dev/ops")
+    spec = path / "ansible/roles/agent_harness/meta/argument_specs.yml"
+    spec.parent.mkdir(parents=True)
+    spec.write_text(
+        "argument_specs:\n  main:\n    options:\n      repository:\n"
+        "        type: path\n        description: >-\n"
+        "          Existing clone for the installer's git hooks, defaulting to\n"
+        "          Code/github.com/tbhb-dev/ops in the home.\n"
+        "          See https://github.com/tbhb-dev/ops.git for context.\n"
+        "        default: /home/agent/Code/github.com/tbhb-dev/ops\n"
+    )
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert verify_exit((path, commit), made, mono) == 0
+    assert capsys.readouterr().out == "verify: 0 problems\n"
 
 
 @pytest.mark.parametrize(
     ("dest", "data", "findings"),
     [
         ("a.md", b"github.com/o/n\n", []),
-        ("a.sh", b"ok\ngithub.com/o/n\n", [(2, "address of an old repository")]),
-        ("a.sh", b"\ngithub.com/o/n\n", [(2, "address of an old repository")]),
+        (
+            "a.sh",
+            b"ok\nhttps://github.com/o/n\n",
+            [(2, "address of an old repository")],
+        ),
+        ("a.sh", b"\nhttps://github.com/o/n\n", [(2, "address of an old repository")]),
+        ("a.sh", b"/home/user/Code/github.com/o/n\ngithub.com/o/n\n", []),
+        (
+            "a.go",
+            b'import "github.com/o/n/pkg"\n',
+            [(1, "Go path from an old repository")],
+        ),
+        (
+            "example.MODULE.bazel",
+            b'bazel_dep(name = "go_tbhb_dev")\n',
+            [
+                (1, "Bazel dependency from an old repository"),
+            ],
+        ),
+        ("a.sh", b'bazel_dep(name = "tbhb_rules")\n', []),
         (
             "ci.yaml",
             b"url: https://github.com/o/n\n",
@@ -722,12 +829,33 @@ def test_verify_rejects_old_module_imports_beside_local_fixtures(
         ("ci.yaml", b"run: |\n  uses: o/n/action@v1\n", []),
         ("ci.yaml", b"# empty\n", []),
         ("ci.yaml", b"---\n", []),
-        ("ci.yaml", b"uses: o/n/action@v1 # github.com/o/n\n", [(1, WORKFLOW)]),
+        ("ci.yaml", b"uses: o/n/action@v1 # https://github.com/o/n\n", [(1, WORKFLOW)]),
+        (
+            "ci.yaml",
+            b"{uses: o/n/action@v1, url: https://github.com/o/n}\n",
+            [(1, WORKFLOW)],
+        ),
+        (
+            "ci.yaml",
+            (
+                b"description: ['Example https://github.com/o/n.git']\n"
+                b"run: |\n  echo hello\n  git clone https://github.com/o/n.git\n"
+            ),
+            [(4, "address of an old repository")],
+        ),
+        (
+            "ci.yaml",
+            b"jobs: {description: {uses: o/n/action@v1}}\n",
+            [(1, WORKFLOW)],
+        ),
         ("script.sh", b"uses: o/n/action@v1\n", [(1, WORKFLOW)]),
         ("snippet.sh", b"uses: > o/n/action@v1\n", []),
         (
             "snippet.sh",
-            b"github.com/o/n github.com/o/n\nuses: o/n/action@v1 # github.com/o/n\n",
+            (
+                b"https://github.com/o/n https://github.com/o/n\n"
+                b"uses: o/n/action@v1 # https://github.com/o/n\n"
+            ),
             [(1, "address of an old repository"), (2, WORKFLOW)],
         ),
     ],
@@ -758,6 +886,11 @@ def test_references(dest: str, data: bytes, findings: list[tuple[int, str]]) -> 
     [
         ("ci.yml", "jobs: {check: {uses: 'REPO/workflow.yml@v1'}}\n", WORKFLOW),
         ("snippet.sh", 'uses: "REPO/action@v1"\n', WORKFLOW),
+        (
+            "clone.sh",
+            'git clone "https://github.com/REPO.git"\n',
+            "address of an old repository",
+        ),
         (
             "renovate.json",
             '{"extends": ["github>REPO"]}\n',

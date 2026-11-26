@@ -37,6 +37,17 @@ OLD_REPOS = (
     rb"telemetry|tools|wiki|work)"
 )
 WORKFLOW = "workflow uses an old repository"
+ADDRESS = "address of an old repository"
+GO_REPOSITORY = "Go path from an old repository"
+BAZEL_DEP = "Bazel dependency from an old repository"
+# The module names published by repositories in OLD_REPOS. The rules
+# repository also declares modules for its language and tool integrations.
+OLD_BAZEL_MODULES = (
+    rb"(?:agent_capacity_dev|bazel_r2_cache_dev|dashboard|event_gateway_dev|"
+    rb"github_metrics|go_tbhb_dev|ops|renovate_config|tbhb_rules(?:_\w+)?|"
+    rb"tbhb_dev_(?:agent_config|agent_memories|design|dotfiles|drafts|pm|research|"
+    rb"sm|telemetry|tools))"
+)
 
 
 def old_repositories(repo: str) -> bytes:
@@ -46,15 +57,8 @@ def old_repositories(repo: str) -> bytes:
 
 def rules(
     repo: str, modules: set[str], local_modules: set[str]
-) -> list[tuple[str, re.Pattern[bytes]]]:
-    """The executable references to an old repository, as patterns.
-
-    Workflow calls, Renovate presets and clone addresses name a repository
-    in the design's path map or the source repository. Clone addresses cover
-    Bazel overrides, scripts and Go imports. The source's root
-    go.mod adds its vanity path. Modules declared in the imported tree stay
-    local, including nested fixtures and modules under an old module's path.
-    """
+) -> dict[str, re.Pattern[bytes]]:
+    """Match executable references to repositories the monorepo absorbs."""
     addresses = old_repositories(repo)
     repository = addresses + rb"(?![\w.-])"
     found = {
@@ -62,19 +66,27 @@ def rules(
         rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + repository,
         "Renovate preset from an old repository": rb"['\"](?:github|local)>"
         + repository,
-        "address of an old repository": rb"github\.com[/:]" + addresses + rb"(?![\w-])",
+        ADDRESS: rb"(?<![\w./-])(?:https://github\.com/|ssh://(?:git@)?github\.com/|"
+        rb"git@github\.com:)" + addresses + rb"(?:\.git)?(?![\w.-]|/[\w./-])",
+        BAZEL_DEP: rb"(?m)^[ \t]*bazel_dep\s*\([^)]*?\bname\s*=\s*['\"]"
+        + OLD_BAZEL_MODULES
+        + rb"['\"]",
     }
+    local = b"|".join(re.escape(m.encode()) for m in sorted(local_modules - modules))
+    exclude = rb"(?!(?:" + local + rb")(?![\w.-]))" if local else b""
+    go_path = rb"(?<![\w./:-])" + exclude
     for module in sorted(modules):
         found[f"Go path {module}"] = (
-            rb"(?<![\w.-])" + re.escape(module.encode()) + rb"(?![\w-])"
+            go_path + re.escape(module.encode()) + rb"(?![\w.-])"
         )
-    local = b"|".join(re.escape(m.encode()) for m in sorted(local_modules))
-    exclude = rb"(?!(?:" + local + rb")(?![\w.-]))" if local else b""
-    return [(rule, re.compile(exclude + pattern)) for rule, pattern in found.items()]
+    found[GO_REPOSITORY] = go_path + rb"github\.com/" + repository
+    return {rule: re.compile(pattern) for rule, pattern in found.items()}
 
 
-def yaml_uses(data: bytes, repo: str) -> Iterator[int]:
-    """Lines of parsed YAML keys whose uses value names an old repository."""
+def yaml_references(
+    data: bytes, repo: str, address: re.Pattern[bytes]
+) -> Iterator[tuple[int, str]]:
+    """Find workflow calls and clone URLs outside YAML descriptions."""
     repository = re.compile(old_repositories(repo) + rb"(?![\w.-])")
     pending = list(
         cast("Iterator[Node]", yaml.compose_all(data, Loader=yaml.SafeLoader))
@@ -89,31 +101,56 @@ def yaml_uses(data: bytes, repo: str) -> Iterator[int]:
             pending.extend(node.value)
         elif isinstance(node, MappingNode):
             for key, value in node.value:
-                if (
-                    isinstance(key, ScalarNode)
-                    and key.value == "uses"
-                    and isinstance(value, ScalarNode)
-                    and repository.match(value.value.strip().encode())
-                ):
-                    yield key.start_mark.line + 1
+                if isinstance(key, ScalarNode):
+                    if key.value == "description" and isinstance(
+                        value, (ScalarNode, SequenceNode)
+                    ):
+                        continue
+                    if (
+                        key.value == "uses"
+                        and isinstance(value, ScalarNode)
+                        and repository.match(value.value.strip().encode())
+                    ):
+                        yield key.start_mark.line + 1, WORKFLOW
                 pending.append(value)
+        else:
+            start = node.start_mark
+            # PyYAML retains the source buffer when loading bytes in memory.
+            raw = cast("str", start.buffer)[start.index : node.end_mark.index].encode()
+            for match in address.finditer(raw):
+                yield start.line + raw.count(b"\n", 0, match.start()) + 1, ADDRESS
 
 
 def references(
-    dest: str, data: bytes, patterns: list[tuple[str, re.Pattern[bytes]]], repo: str
+    dest: str, data: bytes, patterns: dict[str, re.Pattern[bytes]], repo: str
 ) -> Iterator[str]:
     """One finding for each line of a non-prose file that matches a rule."""
-    if PurePosixPath(dest).suffix in PROSE:
+    path = PurePosixPath(dest)
+    if path.suffix in PROSE:
         return
     found: dict[int, str] = {}
-    is_yaml = PurePosixPath(dest).suffix in {".yml", ".yaml"}
+    is_yaml = path.suffix in {".yml", ".yaml"}
     if is_yaml:
         try:
-            found.update((line, WORKFLOW) for line in yaml_uses(data, repo))
+            for line, rule in yaml_references(data, repo, patterns[ADDRESS]):
+                if rule == WORKFLOW:
+                    found[line] = rule
+                else:
+                    found.setdefault(line, rule)
         except yaml.YAMLError as exc:
             yield f"{dest}: invalid YAML: {exc}"
-    for rule, pattern in patterns:
-        if is_yaml and rule == WORKFLOW:
+    for rule, pattern in patterns.items():
+        if is_yaml and rule in {WORKFLOW, ADDRESS}:
+            continue
+        if rule == BAZEL_DEP and not (
+            path.name == "MODULE.bazel" or path.name.endswith(".MODULE.bazel")
+        ):
+            continue
+        if (
+            rule == GO_REPOSITORY
+            and path.suffix != ".go"
+            and path.name not in {"go.mod", "go.sum", "go.work", "go.work.sum"}
+        ):
             continue
         for match in pattern.finditer(data):
             number = data.count(b"\n", 0, match.start()) + 1
