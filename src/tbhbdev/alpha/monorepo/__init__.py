@@ -136,7 +136,7 @@ def import_files(args: argparse.Namespace) -> int:
 
 def verify_tree(args: argparse.Namespace) -> int:
     clone, commit, made = source_and_map(args.source, args.map)
-    problems = check(clone, commit, made, Path(args.tree))
+    problems = check(clone, commit, made, Path(args.tree), Path(args.map))
     for problem in problems:
         print(terminal_text(problem))
     print(f"verify: {len(problems)} problems")

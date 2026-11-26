@@ -77,7 +77,9 @@ def inventory(tree: Path, dest: str, problems: list[str]) -> set[str]:
     return found
 
 
-def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
+def check(
+    clone: str, commit: str, made: PathMap, tree: Path, map_file: Path
+) -> list[str]:
     """Every problem found, one line each; none means the import is faithful."""
     listing = files(clone, commit)
     problems = made.gaps(listing)
@@ -91,9 +93,14 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
         problems.append(f"{tree / made.dest}: cannot scan: {exc}")
         actual = set()
     srcs = sorted(listing.keys() & writes.keys())
-    expected = {writes[src][0] for src in srcs}
+    allowed = {f"{made.dest}/OWNERS", *(writes[src][0] for src in srcs)}
+    root = tree.resolve()
+    # Match the selected entry even when the map file is a symbolic link.
+    map_path = map_file.parent.resolve() / map_file.name
+    if map_path.parent.is_relative_to(root / made.dest):
+        allowed.add(map_path.relative_to(root).as_posix())
     problems.extend(
-        f"{dest}: not produced by the map" for dest in sorted(actual - expected)
+        f"{dest}: not produced by the map" for dest in sorted(actual - allowed)
     )
     for src, data in zip(
         srcs, contents(clone, [listing[s].oid for s in srcs]), strict=True
