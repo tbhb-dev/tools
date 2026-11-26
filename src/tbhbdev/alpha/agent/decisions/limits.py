@@ -42,7 +42,9 @@ def parse(text: str) -> Reading | str:
         if len(parts) != _FIELDS:
             raise ValueError  # noqa: TRY301 -- one cause for every bad shape
         pressure = None if parts[6] == _UNKNOWN else float(parts[6])
-        found = Reading(float(parts[0]), *(int(p) for p in parts[1:6]), pressure)
+        load = float(parts[0])
+        cpus, total, available, swap_total, swap_used = (int(p) for p in parts[1:6])
+        found = Reading(load, cpus, total, available, swap_total, swap_used, pressure)
     except ValueError:
         return "unparsable output"
     sizes = (found.memory_available, found.swap_total, found.swap_used)

@@ -61,7 +61,10 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument(
         "--ignore-limits",
         action="store_true",
-        help="launch although the host's load, memory or swap exceeds its limits",
+        help=(
+            "launch although the host's load, memory, memory pressure or swap "
+            "exceeds its limits"
+        ),
     )
     execute.add_argument(
         "--expect-commit",

@@ -144,6 +144,15 @@ def test_the_pressure_limits_are_per_host() -> None:
     ]
 
 
+def test_macos_level_one_refuses_when_the_host_limit_is_one() -> None:
+    found = dataclasses.replace(FULL_SWAP, pressure=1)
+    host = dataclasses.replace(MAC, max_memory_pressure_level=1)
+    refuse, message = limits.decide(host, found, 0, ignore=False)
+    assert refuse
+    assert "memory pressure level 1 >= limit 1" in message
+    assert not limits.decide(MAC, found, 0, ignore=False)[0]
+
+
 def test_decide_allows_swap_of_zero() -> None:
     reading = limits.Reading(1.0, 8, 1000, 500, 0, 0, None)
     assert limits.decide(LINUX, reading, 0, ignore=False) == (False, "")
