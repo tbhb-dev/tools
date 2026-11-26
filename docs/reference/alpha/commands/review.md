@@ -2,12 +2,12 @@
 description: Review drafts, threads, policy checks and the run host's review posting.
 generated:
   - role: generated
-    harness: codex:0.166.0
+    harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:0f9b0c878a9f9448
-    at: "2026-11-26T15:06:00Z"
+    session: sha-256-64:c860368be54f7f86
+    at: "2026-11-26T16:19:50Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -17,6 +17,7 @@ type: Reference
 # Review commands
 
 `review draft N` and `review check N` create and check a review draft.
+The Summary gives the reasons for the review in one or two sentences.
 `review post N [--author LOGIN]` submits a review document as a comment.
 New posts require a recognized agent session and end with its validated `Generated-by` trailer.
 `review dismiss N REVIEW_ID --reason TEXT` marks a review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
@@ -47,6 +48,7 @@ A draft with a repeated frontmatter key is refused.
 The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned commit.
 Before an approval it reads the pull request head once and refuses if the head differs.
 A request for changes requires non-empty findings.
+The host reads the run's final verdict line separately from the draft body for headless runs without an output schema.
 Any 2xx answer counts as posted.
 The review body ends with a line giving the run name and the judged head, then a blank line and a `Generated-by` trailer.
 The host builds the trailer from its run request, using the commit hook's model and effort rules and the run kind (`exec` or `start`) as the surface.

@@ -39,6 +39,7 @@ LENSES = {
 }
 BLOCK = Finding("BLOCK", "src/storage.py", 17, "Preserve the last saved record.")
 VERIFICATION = "Read the storage migration and traced the failure path."
+SUMMARY = "The migration preserves the recorded state on retry."
 
 
 @pytest.fixture
@@ -97,7 +98,8 @@ def test_render_and_validate(
     verdict = "NO-GO" if blocked else "GO"
     finding_line = f"\n- BLOCK `{BLOCK.path}:{BLOCK.line}` {BLOCK.summary}\n"
     draft = (
-        skeleton.replace("## Verdict\n", f"## Verdict\n\n{verdict}\n")
+        skeleton.replace("verdict:\n", f"verdict: {verdict}\n")
+        .replace("## Summary\n", f"## Summary\n\n{SUMMARY}\n")
         .replace("## Findings\n", "## Findings\n" + (finding_line if blocked else ""))
         .replace("## Verification\n", f"## Verification\n\n{VERIFICATION}\n")
     )
@@ -107,6 +109,7 @@ def test_render_and_validate(
         HEAD,
         tier,
         verdict,
+        SUMMARY,
         Run("review-storage", "openai", "gpt-6", variant, "reviewer.example.org"),
         (BLOCK,) if blocked else (),
         VERIFICATION,
@@ -118,6 +121,7 @@ def test_render_and_validate(
         "schema: 2",
         'repo: "tbhb-dev/tools"',
         "pr: 385",
+        f"verdict: {verdict}",
     ]
     assert content.check_review(body, metadata=review_metadata(doc)) == []
 
@@ -142,10 +146,16 @@ def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> Non
     assert "For REQUEST_CHANGES, include a BLOCK finding" in prompt
     assert "`tbhbdev alpha review check 385 --no-lint`" in prompt
     assert "exactly one `.git/tbhb-alpha/review-385.md`" in prompt
+    assert "In Summary, give the reasons in one or two sentences." in prompt
+    assert "matching the review event" in prompt
+    assert "Keep the line in the final message only" in prompt
     prompt_lines = prompt.splitlines()
     assert f"VERDICT: GO {HEAD}" in prompt_lines
     assert f"VERDICT: BLOCK {HEAD}" in prompt_lines
-    assert "VERDICT" not in review_prompt.skeleton(tier, delta, variant, fields)
+    skeleton = review_prompt.skeleton(tier, delta, variant, fields)
+    assert "## Summary" in skeleton
+    assert "## Verdict" not in skeleton
+    assert "VERDICT:" not in skeleton
 
 
 def test_installed_lens_ids() -> None:

@@ -7,6 +7,7 @@ import pytest
 from tbhbdev import content, cue_runtime
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
+SUMMARY = "The cache preserves the last saved value."
 REVIEW = f"""Run: review-build
 Provider: openai
 Model: gpt-6
@@ -15,9 +16,9 @@ Host: reviewer.example.org
 Head: {SHA}
 Tier: 1
 
-## Verdict
+## Summary
 
-GO
+{SUMMARY}
 
 ## Findings
 
@@ -71,9 +72,7 @@ def review_cue(monkeypatch: pytest.MonkeyPatch) -> None:
     [
         REVIEW + VERIFICATION,
         REVIEW + DEBT + SECURITY + VERIFICATION,
-        REVIEW.replace("Tier: 1", "Tier: 2").replace("\nGO\n", "\nNO-GO\n")
-        + BLOCK
-        + VERIFICATION,
+        REVIEW.replace("Tier: 1", "Tier: 2") + BLOCK + VERIFICATION,
         REVIEW.replace("Tier: 1", "Tier: 0") + DEBT * 8 + VERIFICATION,
         REVIEW + LONG_FINDING * 5 + VERIFICATION,
         REVIEW + VERIFICATION + "\n" + "word " * 90 + "word.\n",
@@ -87,11 +86,10 @@ def test_check_review_accepts(review: str) -> None:
 @pytest.mark.parametrize(
     ("review", "reason"),
     [
-        (REVIEW + BLOCK, "GO forbids BLOCK"),
-        (REVIEW.replace("\nGO\n", "\nNO-GO\n") + DEBT, "NO-GO requires"),
-        (REVIEW.replace("\nGO\n", "\nHOLD\n"), "blocks.verdict.content"),
-        (REVIEW.replace("\nGO\n", "\nAPPROVE\n"), "blocks.verdict.content"),
-        (REVIEW.replace("## Verdict", "## Decision"), "blockOrder"),
+        (REVIEW.replace(SUMMARY, ""), "blocks.summary.content"),
+        (REVIEW.replace(SUMMARY, "- Read the cache."), "blocks.summary.content"),
+        (REVIEW.replace(SUMMARY, "word " * 60 + "word."), "blocks.summary.metrics"),
+        (REVIEW.replace("## Summary", "## Verdict"), "blockOrder"),
         (REVIEW + "## Context\n\nMore notes.\n", "blockOrder"),
         ("# Review\n\n" + REVIEW, "blocks.preamble.content"),
         (REVIEW.replace("Provider: openai\n", ""), "blocks.preamble.content"),
@@ -117,15 +115,15 @@ def test_check_review_accepts(review: str) -> None:
         (REVIEW.replace("Head: 0", "Head: z"), "blocks.preamble.content"),
         (REVIEW.replace("Head: 0", "Head: "), "blocks.preamble.content"),
         (REVIEW.replace("Head: 0", "Head: 00"), "blocks.preamble.content"),
-        (REVIEW + DEBT.replace("TECH-DEBT", "NOTE"), "_class"),
+        (REVIEW + DEBT.replace("TECH-DEBT", "NOTE"), "blocks.findings.content"),
         (REVIEW + DEBT.replace(":8", ":0"), "_parts"),
         (REVIEW + DEBT.replace(":8", ""), "_parts"),
         (REVIEW + "1." + DEBT[1:], "blocks.findings.content"),
         (REVIEW + "- [ ] " + DEBT[2:], "task checkbox"),
-        (REVIEW + DEBT + "  - Nested item.\n", ".blocks"),
+        (REVIEW + DEBT + "  - Nested item.\n", "blocks.findings.content"),
         (REVIEW + "Explain the change.\n", "blocks.findings.content"),
-        (REVIEW + "- TECH-DEBT `app.py:1` Missing period\n", "_sentences"),
-        (REVIEW + DEBT + "  Keep its old name.\n", "_sentences"),
+        (REVIEW + "- TECH-DEBT `app.py:1` Missing period\n", "blocks.findings.content"),
+        (REVIEW + DEBT + "  Keep its old name.\n", "blocks.findings.content"),
         (REVIEW + "- TECH-DEBT `app.py:1` **CI** is  green!\n", "CI gate"),
         (REVIEW + "- TECH-DEBT `app.py:1` CI is green .\n", "CI gate"),
         (REVIEW + "- TECH-DEBT `app.py:1` Move the fixture. 12/12 pass.\n", "CI gate"),
@@ -161,7 +159,7 @@ def test_check_review_accepts_metadata(review_metadata: content.Json) -> None:
     review_metadata.update(
         verdict="NO-GO", tier=0, run={**RUN, "variant": "b"}, findings=[BLOCK_METADATA]
     )
-    header = REVIEW.replace("\nGO\n", "\nNO-GO\n").replace("Tier: 1", "Tier: 0")
+    header = REVIEW.replace("Tier: 1", "Tier: 0")
     header = header.replace("Variant: a", "Variant: b")
     block = BLOCK.replace("saved value", "**saved**\n  value")
     assert (
@@ -174,7 +172,7 @@ def test_check_review_accepts_metadata(review_metadata: content.Json) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
-        ("verdict", "NO-GO", "verdict"),
+        ("verdict", "NO-GO", "NO-GO verdict requires"),
         ("head_sha", "f" * 40, "head_sha"),
         ("head_sha", SHA.upper(), "head_sha"),
         ("tier", 2, "tier"),
@@ -203,13 +201,25 @@ def test_check_review_refuses_metadata(
 
 
 @pytest.mark.usefixtures("review_cue")
+def test_check_review_refuses_block_findings_for_go(
+    review_metadata: content.Json,
+) -> None:
+    review_metadata["findings"] = [BLOCK_METADATA]
+    refusals = content.check_review(
+        REVIEW + BLOCK + VERIFICATION, metadata=review_metadata
+    )
+    assert len(refusals) == 1
+    assert "GO verdict forbids BLOCK findings" in refusals[0]
+
+
+@pytest.mark.usefixtures("review_cue")
 def test_check_review_requires_supplied_metadata_fields(
     review_metadata: content.Json,
 ) -> None:
     assert content.check_review(REVIEW + VERIFICATION, metadata={})
     del review_metadata["verdict"]
     assert (
-        "metadata.verdict"
+        "required field missing: verdict"
         in content.check_review(REVIEW + VERIFICATION, metadata=review_metadata)[0]
     )
 
@@ -234,7 +244,7 @@ def test_check_review_matches_findings(
     review_metadata: content.Json, findings: list[dict[str, object]], reason: str
 ) -> None:
     review_metadata.update(verdict="NO-GO", findings=findings)
-    body = REVIEW.replace("\nGO\n", "\nNO-GO\n") + BLOCK + VERIFICATION
+    body = REVIEW + BLOCK + VERIFICATION
     refusals = content.check_review(body, metadata=review_metadata)
     assert len(refusals) == 1
     assert reason in refusals[0]

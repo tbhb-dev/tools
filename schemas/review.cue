@@ -41,16 +41,17 @@ import (
 #ReviewBody: #Draft & {
 	object:  "pr-review"
 	variant: "review"
-	blockOrder: ["preamble", "verdict", "findings", "verification"]
+	blockOrder: ["preamble", "summary", "findings", "verification"]
 	blocks: close({
 		preamble: {
 			kind: "text"
 			content: [#Paragraph & {visible: =~#ReviewHeader}]
 		}
-		verdict: {
+		summary: {
 			kind:    "section"
-			heading: "Verdict"
-			content: [#Paragraph & {visible: #ReviewVerdict}]
+			heading: "Summary"
+			content: [#Paragraph & {visible: =~#Word}]
+			metrics: visible: words: <=60
 		}
 		findings: {
 			kind:    "section"
@@ -68,12 +69,6 @@ import (
 	})
 	_findings: [for group in blocks.findings.content for item in group.items {item}]
 	_blockCount: len([for item in _findings if item._class == "BLOCK" {item}])
-	if blocks.verdict.content[0].visible == "NO-GO" && _blockCount == 0 {
-		_err: error("NO-GO requires at least one BLOCK finding")
-	}
-	if blocks.verdict.content[0].visible == "GO" && _blockCount > 0 {
-		_err: error("GO forbids BLOCK findings")
-	}
 }
 
 #ReviewMetadata: close({
@@ -103,10 +98,15 @@ import (
 	#ReviewBody
 	metadata: #ReviewMetadata
 	let header = regexp.FindSubmatch(#ReviewHeader, Body.blocks.preamble.content[0].visible)
+	if metadata.verdict == "NO-GO" && Body._blockCount == 0 {
+		_err: error("NO-GO verdict requires at least one BLOCK finding")
+	}
+	if metadata.verdict == "GO" && Body._blockCount > 0 {
+		_err: error("GO verdict forbids BLOCK findings")
+	}
 
 	// Match supplied metadata without filling in any missing fields.
 	_matchingMetadata: metadata & {
-		verdict:  Body.blocks.verdict.content[0].visible
 		head_sha: header[6]
 		tier:     json.Unmarshal(header[7])
 		run: {

@@ -20,7 +20,7 @@ HEAD = "a1" * 20
 NEXT = "B2" * 20
 FRONT = f"---\npr: 7\ncommit_id: '{HEAD}'\nevent: COMMENT\n---\n"
 BODY = (
-    "## Verdict\n\nThe change passes.\n\n## Verification\n\n"
+    "## Summary\n\nThe change passes.\n\n## Verification\n\n"
     "Read the diff and ran the tests. CI passed.\n"
 )
 FILLED = FRONT + BODY
@@ -40,6 +40,8 @@ def head(world: World, value: str = HEAD) -> None:
 
 
 def test_template_and_sections_agree() -> None:
+    assert "## Summary\n" in review.TEMPLATE
+    assert "## Verdict\n" not in review.TEMPLATE
     assert re.findall(r"^## (.+)$", review.TEMPLATE, re.MULTILINE) == [
         section.heading for section in review.SECTIONS
     ]
@@ -92,7 +94,7 @@ def test_check_without_lint_accepts_a_filled_comment_draft(
         text = re.sub(r"<!--.*?-->\n", "", path.read_text(), flags=re.DOTALL)
         path.write_text(
             text.replace("event:", "event: COMMENT")
-            .replace("## Verdict", "## Verdict\n\nGO")
+            .replace("## Summary", "## Summary\n\nRead the diff.")
             .replace("## Findings\n\n\n", "")
             .replace("## Suggestions\n\n\n", "")
             .replace("## Verification", "## Verification\n\nRead the diff.")
@@ -238,7 +240,10 @@ def test_non_mapping_frontmatter_fails(meta: str) -> None:
 def test_events_and_uppercase_hex_pass(event: str) -> None:
     body = BODY.replace(
         "## Verification",
-        "## Findings\n\n- `src/file.py:3` must handle empty input.\n\n## Verification",
+        "## Findings\n\n- BLOCK: `src/file.py:3` must handle empty input.\n"
+        "- TECH-DEBT: `src/file.py:4` simplify the branch.\n"
+        "- SECURITY-DEBT: `src/file.py:5` narrow the file permissions.\n"
+        "\n## Verification",
     )
     assert structure((FRONT + body).replace("COMMENT", event).replace(HEAD, NEXT)) == []
 
@@ -264,19 +269,19 @@ def test_comments_do_not_count_as_findings() -> None:
     [
         ("# Title\n\n" + BODY, 6, "a review must not contain an H1 title"),
         ("stray\n\n" + BODY, 6, "text before the first section"),
-        (BODY.replace("## Verdict", "## Other"), 6, "unknown section"),
+        (BODY.replace("## Summary", "## Other"), 6, "unknown section"),
         (
-            BODY.replace("## Verification", "## Verdict"),
+            BODY.replace("## Verification", "## Summary"),
             10,
             "duplicated or out of order",
         ),
         (
-            BODY.replace("## Verdict\n\nThe change passes.\n\n", ""),
+            BODY.replace("## Summary\n\nThe change passes.\n\n", ""),
             6,
-            "missing required section 'Verdict'",
+            "missing required section 'Summary'",
         ),
-        ("## Verdict\n\nFine.\n", 6, "missing required section 'Verification'"),
-        (BODY.replace("The change passes.", ""), 6, "section 'Verdict' is empty"),
+        ("## Summary\n\nFine.\n", 6, "missing required section 'Verification'"),
+        (BODY.replace("The change passes.", ""), 6, "section 'Summary' is empty"),
         (BODY.replace("The change passes.", "one\ntwo"), 8, "hard-wrapped"),
         (BODY + "\nGenerated-by: LLM test\n", 14, "the script writes Generated-by"),
         (BODY + "\nSigned-off-by: test\n", 14, "Signed-off-by and Co-authored-by"),
@@ -555,7 +560,7 @@ def test_lint_can_keep_the_default_title_alert(world: World) -> None:
 
 @pytest.mark.parametrize("path", [Path("draft.md"), Path(".github/reviews/draft.md")])
 def test_lint_creates_the_requested_relative_path(world: World, path: Path) -> None:
-    assert pr.lint(["## Verdict", "", "Fine."], 6, path=path) == []
+    assert pr.lint(["## Summary", "", "Fine."], 6, path=path) == []
     for name in ("vale", "cspell", "rumdl"):
         (call,) = world.calls(name)
         assert cast("list[str]", call["argv"])[-1] == str(path)
@@ -564,7 +569,7 @@ def test_lint_creates_the_requested_relative_path(world: World, path: Path) -> N
 @pytest.mark.parametrize("body", ["", "\n", " \n\t\n"])
 def test_empty_body_reports_required_sections(body: str) -> None:
     assert structure(FRONT + body) == [
-        (6, "missing required section 'Verdict'"),
+        (6, "missing required section 'Summary'"),
         (6, "missing required section 'Verification'"),
     ]
 
@@ -640,7 +645,7 @@ def test_refresh_fills_an_empty_commit_value(value: str) -> None:
 def test_empty_body_skips_external_linters() -> None:
     with patch.object(pr, "lint") as lint:
         assert review.check_text(FRONT + " \n", 7) == [
-            (6, "missing required section 'Verdict'"),
+            (6, "missing required section 'Summary'"),
             (6, "missing required section 'Verification'"),
         ]
         lint.assert_not_called()

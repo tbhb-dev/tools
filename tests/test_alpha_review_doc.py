@@ -19,8 +19,9 @@ REPO = "tbhb-dev/tools"
 RUN = Run("review-build", "openai", "gpt-6", "a", "reviewer.example.org")
 BLOCK = Finding("BLOCK", "src/app.py", 4, "Return the saved value.")
 DEBT = Finding("TECH-DEBT", "tests/test_app.py", 8, "Rename the fixture.")
-DOC = ReviewDoc(REPO, 384, HEAD, 2, "NO-GO", RUN, (BLOCK,), "Read the cache.")
-PREAMBLE = "---\nschema: 2\nrepo: tbhb-dev/tools\npr: 384\n---\n"
+SUMMARY = "A warm cache can return a stale value."
+DOC = ReviewDoc(REPO, 384, HEAD, 2, "NO-GO", SUMMARY, RUN, (BLOCK,), "Read the cache.")
+PREAMBLE = "---\nschema: 2\nrepo: tbhb-dev/tools\npr: 384\nverdict: NO-GO\n---\n"
 BODY = f"""Run: review-build
 Provider: openai
 Model: gpt-6
@@ -29,9 +30,9 @@ Host: reviewer.example.org
 Head: {HEAD}
 Tier: 2
 
-## Verdict
+## Summary
 
-NO-GO
+{SUMMARY}
 
 ## Findings
 
@@ -93,14 +94,16 @@ def test_render_empty_findings_and_alternate_run() -> None:
     ending = f"## Findings\n\n## Verification\n\nRead the cache.\n\n{MARKER}\n"
     assert rendered.endswith(ending)
     body = rendered.removesuffix(f"\n{MARKER}\n")
-    assert review.parse(PREAMBLE + body) == replace(doc, verification="Read the cache.")
+    assert review.parse(PREAMBLE.replace("NO-GO", "GO") + body) == replace(
+        doc, verification="Read the cache."
+    )
 
 
 @pytest.mark.parametrize(
     ("old", "new", "problem"),
     [
         (PREAMBLE, "", r"^expected schema 2 frontmatter with repo and integer pr$"),
-        ("384\n---", "384", "invalid review frontmatter"),
+        ("NO-GO\n---", "NO-GO", "invalid review frontmatter"),
         ("pr: 384", "pr: [", "invalid review frontmatter"),
         ("pr: 384", "pr: 384\npr: 383", "invalid review frontmatter"),
         ("pr: 384", 'pr: !!int ""', "invalid review frontmatter"),
@@ -111,14 +114,15 @@ def test_render_empty_findings_and_alternate_run() -> None:
         ("pr: 384", "pr: 384\nextra: value", "mismatched review frontmatter field"),
         ("pr: 384", "pr: 384\ntier: 1", "mismatched review frontmatter field"),
         (
-            "Verdict\n",
+            "Summary\n",
             "Findings\n",
-            r"^expected Verdict, Findings, and Verification sections in order$",
+            r"^expected Summary, Findings, and Verification sections in order$",
         ),
         ("Tier: 2", "Tier: 3", r"^expected the seven run header lines$"),
         ("Run:", " Run:", "seven run header lines"),
         ("Run:", "XRun:", "seven run header lines"),
-        ("NO-GO", "HOLD", r"^expected a GO or NO-GO verdict$"),
+        ("NO-GO", "HOLD", r"^expected a GO or NO-GO verdict in frontmatter$"),
+        ("verdict: NO-GO\n", "", "expected a GO or NO-GO verdict in frontmatter"),
         ("- BLOCK", "- NOTE", "invalid finding"),
         ("app.py:4", "app.py:0", "invalid finding"),
     ],
@@ -164,10 +168,15 @@ def test_parse_refuses_oversized_finding_line() -> None:
 def test_round_trip_preserves_summary_and_verification(spacer: str) -> None:
     finding = replace(DEBT, class_="SECURITY-DEBT", summary=f"Handle X{spacer}")
     verification = f"Read cache tests.\n\nChecked API X{spacer}"
-    doc = replace(DOC, verdict="GO", findings=(finding,), verification=verification)
-    assert (
-        review.parse(PREAMBLE + review.render(doc).removesuffix(f"\n{MARKER}\n")) == doc
+    doc = replace(
+        DOC,
+        verdict="GO",
+        summary=f"The cache returns the saved value.{spacer}",
+        findings=(finding,),
+        verification=verification,
     )
+    body = review.render(doc).removesuffix(f"\n{MARKER}\n")
+    assert review.parse(PREAMBLE.replace("NO-GO", "GO") + body) == doc
 
 
 def test_marker_uses_last_matching_line() -> None:
@@ -363,6 +372,44 @@ def draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return stem.with_suffix(".doc.md")
 
 
+def test_post_cli_refuses_old_verdict_heading(
+    draft: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    draft.write_text(
+        PREAMBLE.replace("verdict: NO-GO\n", "")
+        + BODY.replace("## Summary", "## Verdict").replace(SUMMARY, "NO-GO")
+    )
+    api = FakeApi()
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    assert cli.main(["post", "384"], "review") == 1
+    assert capsys.readouterr().err == (
+        f"{draft}: expected Summary, Findings, and Verification sections in order\n"
+    )
+    assert api.calls == []
+
+
+def test_post_cli_has_no_session_post_for_standard_drafts(
+    draft: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    standard = draft.with_suffix("").with_suffix(".md")
+    body = BODY[BODY.index("## Summary") :]
+    standard.write_text(f"---\npr: 384\ncommit_id: {HEAD}\nevent: APPROVE\n---\n{body}")
+    api = FakeApi()
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    assert cli.main(["post", "384"], "review") == 1
+    assert capsys.readouterr().err.startswith(f"{draft}: ")
+    assert api.calls == []
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+def test_post_refuses_a_copied_final_verdict_line() -> None:
+    api = FakeApi()
+    doc = replace(DOC, verification=f"Read the cache.\n\nVERDICT: BLOCK {HEAD}")
+    with pytest.raises(review.ReviewError, match="final verdict line"):
+        review.post(api, doc, author=EXISTING.author, identity_value=IDENTITY)
+    assert api.calls == []
+
+
 @pytest.mark.usefixtures("use_bazel_cue")
 @pytest.mark.parametrize(
     ("doc", "response", "expected"),
@@ -397,7 +444,8 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     assert api.calls == calls
     api = FakeApi(USER, LIVE, [], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
-    draft.write_text(PREAMBLE + body.removesuffix(f"\n{MARKER}\n"))
+    preamble = PREAMBLE.replace("verdict: NO-GO", f"verdict: {doc.verdict}")
+    draft.write_text(preamble + body.removesuffix(f"\n{MARKER}\n"))
     assert cli.main(["post", "384"], "review") == 0
     assert api.calls == [("GET", "user", None), *calls]
     output = "posted\n" if expected is None else f"posted {expected}\n"

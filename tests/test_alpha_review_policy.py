@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 GOOD_TEMPLATE = (
-    "## Verdict\n\n<!-- Required, at most 60 words. -->\n\n"
+    "## Summary\n\n<!-- Required, at most 60 words. -->\n\n"
     "## Notes\n\n<!-- Optional. -->\n\n"
     "## Verification\n\n<!-- Required, at most 100 words. -->\n"
 )
@@ -67,13 +67,13 @@ def test_a_bad_config_is_refused(tmp_path: Path, text: str) -> None:
 
 def test_a_template_must_keep_the_floor_sections_in_order(tmp_path: Path) -> None:
     swapped = (
-        GOOD_TEMPLATE.replace("Verdict", "X")
-        .replace("Verification", "Verdict")
+        GOOD_TEMPLATE.replace("Summary", "X")
+        .replace("Verification", "Summary")
         .replace("X", "Verification")
     )
     write(tmp_path, review_policy.TEMPLATE, swapped)
     assert rules(tmp_path) == ["template-floor-section"]
-    write(tmp_path, review_policy.TEMPLATE, "## Verdict\n\n<!-- Required. -->\n")
+    write(tmp_path, review_policy.TEMPLATE, "## Summary\n\n<!-- Required. -->\n")
     assert rules(tmp_path) == ["template-floor-section"]
 
 
@@ -170,7 +170,7 @@ def test_a_floor_that_fails_to_load_exits_two(
 
 
 def test_the_floor_requires_verdict_and_verification() -> None:
-    assert review_policy.floor_required() == ["Verdict", "Verification"]
+    assert review_policy.floor_required() == ["Summary", "Verification"]
 
 
 def test_review_routes_policy_to_the_check(tmp_path: Path) -> None:

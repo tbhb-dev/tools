@@ -12,7 +12,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import pull_request as pr
-from tbhbdev.alpha import review_doc, review_policy, review_threads
+from tbhbdev.alpha import review_doc, review_policy, review_threads, run_stop_hook
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -38,9 +38,10 @@ Write plain prose, one line per paragraph and list item. Cite code as `path:line
 Remove these guidance comments and any unused optional sections. Write no trailers.
 -->
 
-## Verdict
+## Summary
 
-<!-- Required, at most 60 words. The event and one or two reasons for it. -->
+<!-- Required, at most 60 words. Give the reasons in one or two sentences.
+The event carries the verdict. -->
 
 ## Findings
 
@@ -57,7 +58,7 @@ with `path:line` and what has to change. REQUEST_CHANGES requires findings. -->
 result it relied on. -->
 """
 SECTIONS = [
-    pr.Section("Verdict", required=True, max_words=60),
+    pr.Section("Summary", required=True, max_words=60),
     pr.Section("Findings", required=False, max_words=200),
     pr.Section("Suggestions", required=False, max_words=120),
     pr.Section("Verification", required=True, max_words=100),
@@ -173,6 +174,11 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
         for line, why in pr.body_problems(lines, anchor, SECTIONS)
     ]
     problems += pr.ref_problems(lines)
+    problems += [
+        (line.no, "keep the final verdict line out of the review body")
+        for line in lines
+        if run_stop_hook.VERDICT.fullmatch(line.raw.strip())
+    ]
     if isinstance(data, dict) and data.get("event") == "REQUEST_CHANGES":
         problems += findings_problems(lines, anchor.no)
     rendered = body.splitlines()

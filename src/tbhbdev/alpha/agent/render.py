@@ -41,6 +41,8 @@ REVIEW_PUBLICATION = (
     "and set `commit_id` to the run's pinned checkout commit. "
     "Set `event: APPROVE` for GO or `event: REQUEST_CHANGES` for BLOCK or HOLD, "
     "with non-empty Findings for a change request. "
+    "In Summary, give one or two sentences of reasons and leave out the verdict. "
+    "Keep the final verdict line in your final answer only. "
     "Follow the generated draft's guidance and run "
     "`tbhbdev alpha review check N --no-lint`. "
     "Leave exactly one `.git/tbhb-alpha/review-N.md` for the run host to post."

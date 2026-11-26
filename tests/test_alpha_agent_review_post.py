@@ -23,11 +23,11 @@ MINTED = "minted"
 
 
 def draft(event: str = "COMMENT", head: str = HEAD, *, findings: bool = False) -> str:
-    verdict = "NO-GO" if event == "REQUEST_CHANGES" else "GO"
     extra = "## Findings\n\n- `a.py:1` fix it.\n\n" if findings else ""
     return (
         f"---\npr: 7\ncommit_id: '{head}'\nevent: {event}\n---\n\n"
-        f"## Verdict\n\n{verdict}\n\n{extra}## Verification\n\nRead the diff.\n"
+        f"## Summary\n\nThe tests cover the changed path.\n\n{extra}"
+        "## Verification\n\nRead the diff.\n"
     )
 
 
@@ -108,7 +108,7 @@ class Api:
         ("COMMENT", "b" * 40, []),
     ],
 )
-def test_posts_at_the_pinned_commit_with_identity_in_the_body(
+def test_run_host_preserves_main_review_events_and_stamps_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     event: str,
@@ -129,7 +129,8 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert payload is not None
     assert payload["event"] == event
     assert payload["commit_id"] == HEAD
-    assert payload["body"].startswith("## Verdict")
+    assert payload["body"].startswith("## Summary")
+    assert "VERDICT:" not in payload["body"]
     body, trailer = payload["body"].rstrip("\n").rsplit("\n\n", 1)
     assert body.endswith(f"\n\n{STAMP}")
     key, value = trailer.split(": ", 1)
@@ -304,6 +305,18 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         ("---\npr: [\n---\n", "review-7.md", "invalid YAML"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
+        (
+            draft("APPROVE")
+            .replace("## Summary", "## Verdict")
+            .replace("The tests cover the changed path.", "GO"),
+            "review-7.md",
+            "missing required section 'Summary'",
+        ),
+        (
+            draft("APPROVE") + f"\nVERDICT: GO {HEAD}\n",
+            "review-7.md",
+            "keep the final verdict line out of the review body",
+        ),
     ],
 )
 def test_a_bad_draft_posts_nothing(

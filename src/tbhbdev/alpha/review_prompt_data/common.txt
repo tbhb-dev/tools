@@ -1,5 +1,5 @@
 Judge the evidence for ${repo}#${pr}. For a first review, the scope is the pull request's entire change.
-In Verdict, write GO alone when the evidence supports approval, or NO-GO alone for BLOCK or HOLD.
+In Summary, give the reasons in one or two sentences. Keep the decision in draft frontmatter and in the final verdict line.
 Omit Findings if there are no findings. Otherwise write one bullet list of at most eight items. Each item uses the form "- CLASS `path:line` summary", with a positive line number. Use BLOCK for a required fix, TECH-DEBT for a non-blocking maintenance issue, or SECURITY-DEBT for a non-blocking security issue.
 Ground each finding in the cited code and use one or two sentences with terminal punctuation and at most 40 words total. Omit task checkboxes and restatements of CI gates.
 In Verification, use plain paragraphs of at most 100 words total to say what you read, what you checked, and what the evidence showed.
@@ -8,7 +8,7 @@ Run `tbhbdev alpha review draft ${pr}` and set `commit_id` to ${head}.
 Set `event: APPROVE` for GO or `event: REQUEST_CHANGES` for BLOCK or HOLD. For REQUEST_CHANGES, include a BLOCK finding for each issue preventing approval.
 Run `tbhbdev alpha review check ${pr} --no-lint` and leave exactly one `.git/tbhb-alpha/review-${pr}.md` for the run host to post.
 
-After writing the draft, end your final message with exactly one of these lines, matching the Verdict section. Print nothing after that line.
+After writing the draft, end your final message with exactly one of these lines, matching the review event. Keep the line in the final message only. Print nothing after that line.
 VERDICT: GO ${head}
 VERDICT: BLOCK ${head}
 
@@ -16,6 +16,7 @@ VERDICT: BLOCK ${head}
 schema: 2
 repo: "${repo}"
 pr: ${pr}
+verdict:
 ---
 
 Run: ${run}
@@ -26,7 +27,7 @@ Host: ${host}
 Head: ${head}
 Tier: ${tier}
 
-## Verdict
+## Summary
 
 ## Findings
 
