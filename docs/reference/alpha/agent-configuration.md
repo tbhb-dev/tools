@@ -5,8 +5,8 @@ generated:
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     surface: exec
-    session: sha-256-64:87816a4d23273d34
-    at: "2026-11-26T00:22:07Z"
+    session: sha-256-64:6e402d15023f0de1
+    at: "2026-11-26T01:50:29Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -21,9 +21,9 @@ type: Reference
 
 The launcher warns when the prompt mentions a ref that no `--fetch-ref` option covers.
 
-`agent exec --expect-commit` requires a new commit from a build run. If the run would otherwise succeed and the host records no new commit, it returns exit status 6 and logs `no new commit: the brief expected one (--expect-commit)`. The launcher refuses this flag for the review profile.
+The build profile enables `--expect-commit` by default. If the harness succeeds and the host records no new commit, the run exits 6 and logs `no new commit:`. For a build using its own branch, the host compares the live tip of `refs/heads/agent/<name>` on origin before and after the harness. An absent branch after the run, an unchanged tip, or a failed lookup exits 9 and logs `push failed:`. Builds using `--start-ref` use the selected branch's fast-forward check. Pass `--no-expect-commit` to waive the commit and run branch requirements for research builds. Both flags apply only to the build profile.
 
-Pass `--ref <full sha>` to launch a review and include `--reason` when you use Claude.
+Pass `--ref <full sha>` to launch a review and include `--reason` when you use Claude. Leave a valid review draft. For headless reviews without `--schema`, end the final answer with `VERDICT: GO <full sha>` or `VERDICT: NO-GO <full sha>` for the reviewed commit. If the harness succeeds but the host does not post the review, the run exits 10. The log starts the reason with `review not posted:`, for example when the verdict line is missing, the pull request head moved before an approval, or GitHub refused the POST.
 
 After workspace preparation, a build run reads the repository’s hook configs for references to Bazel shim directories and executables. If a referenced directory is missing, the host reports phase `shims` and uses `bazelisk` or `bazel` to run the `bazel_env` target for each referenced directory’s package, with a 10-minute timeout per target. The harness can start once the referenced executables exist, or once the directory exists if the hooks reference only the directory, even if Bazel returns a nonzero status. Review runs and preflight checks skip this step.
 
@@ -65,7 +65,7 @@ Every `agent exec` run has the agent account’s full access. The account suppli
 
 Claude runs load user settings and the run’s generated settings. They ignore project settings and use only server configuration supplied for the run. The generated settings turn off hooks and the sandbox. Claude uses `bypassPermissions`. Codex marks each run clone as untrusted, which skips its project configuration.
 
-Run-host records phase `unknown` when it can't prove the group stopped. It keeps the harness exit status and appends cleanup messages to the existing log.
+Run-host records phase `unknown` when it can't prove the group stopped and appends cleanup messages to the log. A review with unconfirmed shutdown skips posting.
 
 ```toml
 [agent]

@@ -16,6 +16,7 @@ import httpx
 from tbhbdev.alpha import pull_request, review
 from tbhbdev.alpha.agent import credentials, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.model import RunKind
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
@@ -160,12 +161,37 @@ def stamp(run: Run) -> str:
     )
 
 
+def check_verdict(run: Run) -> None:
+    """Require the final verdict line from a headless review."""
+    for suffix in ("out.final", "out"):
+        try:
+            answer = runfiles.read_owned(
+                run.files.path(suffix), 16 * 1024 * 1024, "review output"
+            )
+        except FileNotFoundError:
+            continue
+        last = answer.rstrip().rpartition("\n")[2]
+        if last in {
+            f"VERDICT: {verdict} {run.request.commit}" for verdict in ("GO", "NO-GO")
+        }:
+            return
+        break
+    message = "no verdict line for the reviewed head at the end of the final answer"
+    raise PostRefusedError(message)
+
+
 def posted(run: Run, prepared: Prepared) -> bool:
-    """Post the run's review and record it; False when it was not posted."""
+    """Ensure the run's review is posted and recorded."""
     if run.files.path("review").exists():
-        return False
+        return True
     workspace = Path(prepared.paths.worktree)
     try:
+        # A supplied output schema defines the final answer's format.
+        if (
+            run.request.kind is RunKind.EXEC
+            and not run.files.path("schema.json").is_file()
+        ):
+            check_verdict(run)
         number, text = find_draft(workspace)
         token = credentials.review_post_token(run.request, run.settings)
         if token is None:

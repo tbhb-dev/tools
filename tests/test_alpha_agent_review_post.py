@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
-from tbhbdev.alpha.agent.model import Profile
+from tbhbdev.alpha.agent.model import Profile, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,12 +39,14 @@ def make(
     if text is not None:
         (directory / name).write_text(text)
     files = runfiles.RunFiles(tmp_path / "runs", "r1")
+    files.write("out.final", f"Review complete.\nVERDICT: GO {HEAD}\n")
     request = SimpleNamespace(
         repo="github.com/o/r",
         commit=HEAD,
         harness=SimpleNamespace(value="codex"),
         model="m1",
         profile=Profile.REVIEW,
+        kind=RunKind.EXEC,
     )
     run = SimpleNamespace(files=files, request=request, settings=object())
     prepared = SimpleNamespace(paths=SimpleNamespace(worktree=str(workspace)))
@@ -140,9 +142,45 @@ def test_a_run_name_posts_only_once(
 
     run.files = runfiles.RunFiles(run.files.root, run.files.name)
     monkeypatch.setattr(credentials, "review_post_token", forbidden)
-    assert not review_post.posted(run, prepared)
+    assert review_post.posted(run, prepared)
     assert [method for method, _, _ in api.calls] == ["POST"]
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
+
+
+@pytest.mark.parametrize(
+    "answer", [None, "Review complete.", f"VERDICT: GO {HEAD}\nExtra text."]
+)
+def test_a_review_without_a_final_verdict_does_not_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str | None
+) -> None:
+    run, prepared = make(tmp_path, draft())
+    run.files.path("out.final").unlink()
+    if answer is not None:
+        run.files.write("out", answer)
+    monkeypatch.setattr(credentials, "review_post_token", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert "review not posted: no verdict line" in run.files.path("log").read_text()
+
+
+@pytest.mark.parametrize(
+    ("kind", "schema"),
+    [(RunKind.EXEC, False), (RunKind.EXEC, True), (RunKind.START, False)],
+)
+def test_review_post_without_a_codex_final_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind, *, schema: bool
+) -> None:
+    run, prepared = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
+    run.files.path("out.final").unlink()
+    if schema:
+        run.files.write("schema.json", '{"type": "object"}')
+        run.files.write("out", '{"result": "Review complete."}')
+    elif kind is RunKind.EXEC:
+        run.files.write("out", f"Review complete.\nVERDICT: NO-GO {HEAD}\n")
+    monkeypatch.setattr(run.request, "kind", kind)
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+    assert [method for method, _, _ in api.calls] == ["POST"]
 
 
 APPROVE_THEN_COMMENT = draft("APPROVE").replace(

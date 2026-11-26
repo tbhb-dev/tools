@@ -134,6 +134,10 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     host = rules.select_host(settings, args.host, args.account)
     harness = Harness(args.harness)
     profile = Profile(args.profile)
+    expect_commit = args.expect_commit
+    if profile is Profile.REVIEW and expect_commit is not None:
+        message = "request expect_commit applies only to a build run"
+        raise Invalid(message)
     reviewer = launch_rules.is_reviewer(args.role, profile)
     if args.worker_workflow and not reviewer:
         message = "--worker-workflow applies to reviewer-role runs only"
@@ -167,7 +171,9 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         fetch_refs=tuple(args.fetch_ref),
         start_ref=args.start_ref,
         max_concurrent_runs=host.max_concurrent_runs,
-        expect_commit=args.expect_commit,
+        expect_commit=profile is Profile.BUILD
+        if expect_commit is None
+        else expect_commit,
     )
     request.check_start_ref(run)
     run = rules.check(
