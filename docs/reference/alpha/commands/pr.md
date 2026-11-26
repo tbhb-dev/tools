@@ -2,12 +2,12 @@
 description: Checking, creating, editing, readying, rerunning, closing and rebasing pull requests, and reading their checks.
 generated:
   - role: generated
-    harness: codex:0.166.0
+    harness: codex:0.171.0
     model: openai:gpt-6.1-sol
     effort: high
     surface: exec
-    session: sha-256-64:88dde4f9530b87d4
-    at: "2026-11-26T06:03:21Z"
+    session: sha-256-64:704794fbfa9dc952
+    at: "2026-11-26T07:15:45Z"
 status: stable
 tags: [alpha]
 title: Pull request commands
@@ -21,8 +21,10 @@ Both default to `.github/PULL_REQUEST_DRAFT.md`.
 `pr edit DRAFT --pr N` updates pull request N and requires the draft path.
 It reads the LLM trailers from the pull request's commits on GitHub and refuses the edit if it cannot list those commits.
 `pr ready N [N...]` marks each one ready for review, only when the pull request's GitHub author is the account the agent's own `gh` runs as.
-`pr rerun N` reruns only the failed jobs of the latest run for pull request N's current head commit.
-It reports an error when that run hasn't failed or no run exists.
+`pr rerun N` reads every page of runs for pull request N's current head commit and reruns the failed jobs of every failed run.
+Passing and unfinished runs are skipped.
+It reports an error when no failed run exists.
+It attempts every rerun even if one fails, and returns the first failure's exit code.
 `pr close N --reason TEXT` (or `--comment TEXT`) closes it after the agent-session, open-state and opened-ledger checks, in origin's repository.
 `pr delete-branch N` deletes only the head branch of a closed or merged pull request in origin's GitHub repository.
 It refuses fork heads, `main`, protected branches, and unreadable metadata.
