@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, cast, override
 import pytest
 from fake_tool import pr_git_baseline as pr_git_baseline  # noqa: PLC0414
 
-from tbhbdev import host, plugins, secrets
+from tbhbdev import cue_runtime, host, plugins, secrets
 from tbhbdev.alpha.agent import credentials, host_tools, launcher, runfiles
 
 if TYPE_CHECKING:
@@ -587,3 +587,12 @@ SAFE_ENVIRONMENT: dict[str, object] = {
         "custom_branch_policies": False,
     },
 }
+
+
+_REVIEW_CUE = Path(shutil.which("cue") or cue_runtime.binary_path())
+
+
+@pytest.fixture
+def review_cue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Bazel supplies the pinned tool on PATH in its test sandbox.
+    monkeypatch.setattr(cue_runtime, "resolve", lambda: _REVIEW_CUE)

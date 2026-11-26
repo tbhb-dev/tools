@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import re
-import shutil
 import zipfile
 from importlib.resources import files
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from tbhbdev import content, cue_runtime
+from tbhbdev import content
 from tbhbdev.alpha import review_doc, review_prompt
-from tbhbdev.alpha.review_doc import Finding, ReviewDoc, ReviewError, Run
-from tbhbdev.alpha.review_doc import _metadata as review_metadata
+from tbhbdev.alpha.review_doc import ReviewError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from tbhbdev.alpha.review_doc import Tier, Variant
 
 HEAD = "192837465a" * 4
@@ -37,16 +36,6 @@ LENSES = {
     "docs": "D",
     "scope": "P",
 }
-BLOCK = Finding("BLOCK", "src/storage.py", 17, "Preserve the last saved record.")
-VERIFICATION = "Read the storage migration and traced the failure path."
-SUMMARY = "The migration preserves the recorded state on retry."
-
-
-@pytest.fixture
-def review_cue(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Bazel supplies the pinned tool on PATH in its test sandbox.
-    if executable := shutil.which("cue"):
-        monkeypatch.setattr(cue_runtime, "resolve", lambda: Path(executable))
 
 
 def _resource(name: str) -> str:
@@ -78,7 +67,7 @@ def test_render_and_validate(
     skeleton = review_prompt.skeleton(tier, delta, variant, fields)
     assert "schema: 2" not in prompt
     assert "run header lines" not in prompt
-    assert "Omit Findings if there are no findings." in prompt
+    assert "Omit Findings and Suggestions when empty." in prompt
     assert _resource(depth) in prompt
     lens_text = "\n".join(_resource(lens) for lens in LENSES)
     assert f"\n{lens_text}\n" in prompt
@@ -96,34 +85,18 @@ def test_render_and_validate(
     assert not re.search(r"[{}$]", prompt)
 
     verdict = "NO-GO" if blocked else "GO"
-    finding_line = f"\n- BLOCK `{BLOCK.path}:{BLOCK.line}` {BLOCK.summary}\n"
+    header = skeleton.split("---\n", 2)[1].replace(
+        "verdict:\n", f"verdict: {verdict}\n"
+    )
+    findings = "## Findings\n\n- F1: P1 correctness Preserve the last saved record.\n\n"
     draft = (
-        skeleton.replace("verdict:\n", f"verdict: {verdict}\n")
-        .replace("## Summary\n", f"## Summary\n\n{SUMMARY}\n")
-        .replace("## Findings\n", "## Findings\n" + (finding_line if blocked else ""))
-        .replace("## Verification\n", f"## Verification\n\n{VERIFICATION}\n")
+        f"---\n{header}---\n## Summary\n\nThe migration can lose records.\n\n"
+        + (findings if blocked else "")
+        + "## Verification\n\n- Traced the failed migration.\n"
     )
-    doc = ReviewDoc(
-        "tbhb-dev/tools",
-        385,
-        HEAD,
-        tier,
-        verdict,
-        SUMMARY,
-        Run("review-storage", "openai", "gpt-6", variant, "reviewer.example.org"),
-        (BLOCK,) if blocked else (),
-        VERIFICATION,
-    )
-    assert review_doc.parse(draft) == doc
-    assert review_doc.validate(doc) == []
-    _, frontmatter, body = draft.split("---\n", 2)
-    assert frontmatter.splitlines() == [
-        "schema: 2",
-        'repo: "tbhb-dev/tools"',
-        "pr: 385",
-        f"verdict: {verdict}",
-    ]
-    assert content.check_review(body, metadata=review_metadata(doc)) == []
+    doc = review_doc.parse(draft)
+    assert doc.head_sha == HEAD
+    assert content.check_review(doc.body, metadata=doc.metadata) == []
 
 
 @pytest.mark.parametrize(
@@ -142,11 +115,11 @@ def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> Non
     assert "`tbhbdev alpha review draft 385`" in prompt
     assert f"set `commit_id` to {HEAD}" in prompt
     assert "`event: APPROVE` for GO" in prompt
-    assert "`event: REQUEST_CHANGES` for BLOCK or HOLD" in prompt
-    assert "For REQUEST_CHANGES, include a BLOCK finding" in prompt
+    assert "`event: REQUEST_CHANGES` for BLOCK" in prompt
+    assert "P0 and P1 require REQUEST_CHANGES" in prompt
     assert "`tbhbdev alpha review check 385 --no-lint`" in prompt
     assert "exactly one `.git/tbhb-alpha/review-385.md`" in prompt
-    assert "In Summary, give the reasons in one or two sentences." in prompt
+    assert "Give one or two sentences of reasons in Summary" in prompt
     assert "matching the review event" in prompt
     assert "Keep the line in the final message only" in prompt
     prompt_lines = prompt.splitlines()

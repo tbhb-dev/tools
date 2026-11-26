@@ -4328,7 +4328,7 @@ def test_review_post_failure_sets_the_completion_status(
         draft = (
             f"---\npr: 7\ncommit_id: '{run.request.commit}'\nevent: COMMENT\n---\n"
             "## Summary\n\nThe change preserves existing behavior.\n\n"
-            "## Verification\n\nRead the diff.\n"
+            "## Verification\n\n- Read the diff.\n"
         )
         if failure is None:
             nested_yaml = "[" * 1000 + "]" * 1000

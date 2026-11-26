@@ -636,6 +636,7 @@ attr_sets = st.fixed_dictionaries(
         "session": hashes,
         "subagent": hashes,
         "surface": st.from_regex(r"[A-Za-z0-9_-]{1,10}", fullmatch=True),
+        "variant": st.sampled_from(["a", "b"]),
     },
 )
 
@@ -667,8 +668,8 @@ def test_format_order_and_omission() -> None:
     assert ai.format_value({"harness": "antigravity"}) == "LLM harness=antigravity"
     assert ai.format_value({"harness": "codex", "model": ""}) == "LLM harness=codex"
     assert sorted(ai.ATTR_ORDER) == ai.ATTR_ORDER
-    assert {"launch", "started_at"} <= set(ai.ATTR_ORDER)
-    assert len(ai.ATTR_ORDER) == 8
+    assert {"launch", "started_at", "variant"} <= set(ai.ATTR_ORDER)
+    assert len(ai.ATTR_ORDER) == 9
 
 
 @given(

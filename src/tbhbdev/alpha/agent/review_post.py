@@ -13,18 +13,18 @@ from typing import TYPE_CHECKING, cast
 
 import httpx
 
-from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import pull_request, review
+from tbhbdev import content
+from tbhbdev.alpha import identity, pull_request, review, review_doc
 from tbhbdev.alpha.agent import credentials, runfiles
 from tbhbdev.alpha.agent.decisions import repo
-from tbhbdev.alpha.agent.model import Harness, RunKind
+from tbhbdev.alpha.agent.decisions import request as requests
+from tbhbdev.alpha.agent.model import Harness, Invalid, RunKind
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
-ALLOWED_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
 VERDICTS = frozenset({"GO", "BLOCK", "NO-GO"})
-DRAFT_NAME = re.compile(r"review-(\d+)\.md")
+DRAFT_NAME = re.compile(r"review-([1-9][0-9]*)(?:\.doc)?\.md")
 DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 
@@ -42,37 +42,58 @@ class Submission:
     text: str
     commit: str
     stamp: str
+    document: bool = False
 
 
-def find_draft(workspace: Path) -> tuple[int, str]:
-    """The run's one review draft as (pull request number, text).
+def find_draft(workspace: Path) -> tuple[int, str, bool]:
+    """Read the run's draft using the same preference as the review CLI.
 
     Raises:
-        PostRefusedError: The run left no draft, or more than one.
+        PostRefusedError: The run did not leave drafts for exactly one pull request.
     """
     directory = workspace / ".git" / "tbhb-alpha"
-    found = sorted(
-        (int(match[1]), path)
+    found = {
+        int(match[1])
         for path in directory.glob("review-*.md")
         if (match := DRAFT_NAME.fullmatch(path.name))
-    )
+    }
     if len(found) != 1:
         message = f"expected one review draft, found {len(found)}"
         raise PostRefusedError(message)
-    number, path = found[0]
-    return number, runfiles.read_owned(path, DRAFT_LIMIT, "review draft")
+    (number,) = found
+    path, document = review.select_draft(number, directory=directory)
+    return number, runfiles.read_owned(path, DRAFT_LIMIT, "review draft"), document
+
+
+def validate_document(sub: Submission) -> tuple[dict[str, object], str]:
+    """Check a schema 2 draft against the pull request and pinned head."""
+    try:
+        doc = review.parse_document(sub.text, sub.number)
+    except review_doc.ReviewError as exc:
+        raise PostRefusedError(str(exc)) from exc
+    _, owner, name = repo.parts(sub.repository)
+    if doc.repo != f"{owner}/{name}":
+        message = "the draft's repo isn't the run's repository"
+        raise PostRefusedError(message)
+    if doc.head_sha != sub.commit:
+        message = "the draft's head_sha isn't the commit the run reviewed"
+        raise PostRefusedError(message)
+    if problems := content.check_review(doc.body, metadata=doc.metadata):
+        raise PostRefusedError(problems[0])
+    event = "APPROVE" if doc.verdict == "GO" else "REQUEST_CHANGES"
+    body = f"{review_doc.render(doc)}\n{sub.stamp}\n"
+    return {**doc.metadata, "event": event}, body
 
 
 def validate(sub: Submission) -> tuple[dict[str, object], str]:
     """Check the draft host-side and return (frontmatter, body).
 
-    Check the schema, template sections and frontmatter key uniqueness without
-    the prose linters, which are unavailable on run hosts.
-
     Raises:
         PostRefusedError: The draft fails a check, names another head than the
             run reviewed, or asks for an event a run can't post.
     """
+    if sub.document:
+        return validate_document(sub)
     try:
         problems = review.check_text(sub.text, sub.number, lint=False)
     except RecursionError as exc:
@@ -84,13 +105,11 @@ def validate(sub: Submission) -> tuple[dict[str, object], str]:
         raise PostRefusedError(message)
     meta, body = pull_request.parse_frontmatter(sub.text)
     fields = cast("dict[str, object]", meta)
-    if fields["event"] not in ALLOWED_EVENTS:
-        message = f"a run can't post a {fields['event']} review"
-        raise PostRefusedError(message)
     if str(fields["commit_id"]).lower() != sub.commit.lower():
         message = "the draft's commit_id isn't the commit the run reviewed"
         raise PostRefusedError(message)
-    return fields, body.strip("\n") + "\n"
+    prose = body.strip("\n")
+    return fields, f"{prose}\n\n{sub.stamp}\n"
 
 
 def api(
@@ -146,7 +165,7 @@ def create(sub: Submission, token: str) -> int | None:
         raise PostRefusedError(message)
     payload = {
         "commit_id": sub.commit,
-        "body": f"{body}\n{sub.stamp}\n",
+        "body": body,
         "event": event,
     }
     data = api("POST", f"{base}/reviews", token, payload)
@@ -155,33 +174,32 @@ def create(sub: Submission, token: str) -> int | None:
 
 
 def stamp(run: Run) -> str:
-    """Format the judged head and a validated trailer from the host's request.
-
-    Raises:
-        PostRefusedError: The host's request cannot produce a valid trailer.
-    """
+    """Build the host-written attribution for the review."""
     request = run.request
     key = (
-        agent_identity.ANTIGRAVITY
+        identity.ANTIGRAVITY
         if request.harness is Harness.AGY
         else request.harness.value
     )
-    model, effort = agent_identity.model_effort(key, request.model, request.effort)
-    ident = agent_identity.Ident(
-        root="",
-        harness=agent_identity.SLUGS[key],
-        model=model,
-        effort=effort,
-        surface=agent_identity.surface_ok(request.kind.value),
+    try:
+        raw_effort = requests.review_effort(request)
+    except Invalid as exc:
+        raise PostRefusedError(str(exc)) from exc
+    model, effort = identity.model_effort(key, request.model, raw_effort)
+    value = identity.format_value(
+        {
+            "effort": effort or "",
+            "harness": identity.SLUGS[key],
+            "launch": identity.sha256_64(run.files.name),
+            "model": model or "",
+            "surface": request.kind.value,
+            "variant": request.variant or "",
+        }
     )
-    value = agent_identity.format_value(ident.attrs())
-    if why := agent_identity.check_value(value):
+    if why := identity.check_value(value):
         message = f"invalid LLM trailer: {why}"
         raise PostRefusedError(message)
-    return (
-        f"Run {run.files.name}, judged head {request.commit}.\n\n"
-        f"{agent_identity.KEY_GEN}: {value}"
-    )
+    return f"{identity.KEY_GEN}: {value}"
 
 
 def check_verdict(run: Run) -> None:
@@ -218,14 +236,18 @@ def posted(run: Run, prepared: Prepared) -> bool:
             and not run.files.path("schema.json").is_file()
         ):
             check_verdict(run)
-        number, text = find_draft(workspace)
-        footer = stamp(run)
+        number, text, document = find_draft(workspace)
         token = credentials.review_post_token(run.request, run.settings)
         if token is None:
             message = "reviews App token unavailable"
             raise PostRefusedError(message)  # noqa: TRY301
         sub = Submission(
-            run.request.repo, number, text, run.request.commit or "", footer
+            run.request.repo,
+            number,
+            text,
+            run.request.commit or "",
+            stamp(run),
+            document,
         )
         identifier = create(sub, token)
     except PostRefusedError as refusal:

@@ -801,6 +801,7 @@ def lint(
     *,
     path: Path = DRAFT,
     drop: frozenset[tuple[int, str]] = frozenset({TITLE_ALERT}),
+    vale_only: bool = False,
 ) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
@@ -809,9 +810,13 @@ def lint(
     draft line ``first + N - 1``. ``drop`` matches a line and either a rule
     prefix or its full diagnostic.
     """
-    tools = [(name, find_tool(name), args, parse) for name, args, parse in LINTERS]
+    if vale_only:
+        configs = (VALE_INI, STYLES)
+        linters = (("vale", ("--output=JSON", "--minAlertLevel=error"), parse_vale),)
+    else:
+        configs, linters = CONFIGS, LINTERS
     top = root()
-    for name in CONFIGS:
+    for name in configs:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
@@ -819,17 +824,19 @@ def lint(
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        for name in CONFIGS:
+        for name in configs:
             (work / name).symlink_to(top / name)
         (work / path).parent.mkdir(parents=True, exist_ok=True)
         (work / path).write_text("\n".join(rendered) + "\n")
-        for name, exe, args, parse in tools:
+        for name, args, parse in linters:
             if name == "vale" and styles:
                 problems.append((first, f"vale: {styles}"))
                 continue
             problems.extend(
                 (first + line - 1, text)
-                for line, text in run_linter(name, [exe, *args], parse, work, path)
+                for line, text in run_linter(
+                    name, [find_tool(name), *args], parse, work, path
+                )
                 if (line, text.split(":")[0]) not in drop and (line, text) not in drop
             )
     return problems

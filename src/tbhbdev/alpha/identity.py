@@ -147,6 +147,7 @@ ATTR_ORDER = [
     "started_at",
     "subagent",
     "surface",
+    "variant",
 ]
 # Attributes every trailer value needs, in the order a missing one is reported.
 REQUIRED = ("harness", "model")

@@ -1,23 +1,26 @@
-<!--
-Write plain prose, one line per paragraph and list item. Cite code as `path:line`.
-Remove these guidance comments and any unused optional sections. Write no trailers.
--->
+<!-- Remove the guidance comments and any unused optional sections. -->
 
 ## Summary
 
-<!-- Required, at most 60 words. Give the reasons in one or two sentences.
-The event carries the verdict. -->
+<!-- Required. Give the reasons in one paragraph of one or two sentences and
+at most 40 words. Put the verdict in the review event. -->
 
 ## Findings
 
-<!-- Optional, at most 200 words. Blocking issues only, one list item each,
-with `path:line` and what has to change. REQUEST_CHANGES requires findings. -->
+<!-- Optional. Use up to eight whole-PR findings in a bullet list. Start each
+with F1: P1 correctness, F2: P2 design, and so on. Count from F1 without gaps.
+Kinds are correctness, security, design, test, and docs. Use one or two
+sentences of at most 30 words after the kind. P0 means harm or a security
+breach, P1 means broken basic use or correctness, P2 means debt worth fixing
+soon, and P3 means minor. Cite a path:line in the diff or cite a check and its
+result. P0 and P1 require REQUEST_CHANGES. -->
 
 ## Suggestions
 
-<!-- Optional, at most 120 words. Non-blocking improvements. -->
+<!-- Optional. Use up to five bullets starting with S1:, S2:, and so on.
+Use at most 25 words after each prefix. -->
 
 ## Verification
 
-<!-- Required, at most 100 words. What the reviewer read or ran, and the CI
-result it relied on. -->
+<!-- Required. Use up to six unnumbered bullets of at most 20 words each.
+Describe what you checked and what the evidence showed. -->

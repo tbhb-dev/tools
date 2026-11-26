@@ -13,6 +13,7 @@ from datetime import date
 from enum import StrEnum
 from typing import NoReturn
 
+from tbhbdev.alpha import identity
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
     NAME,
@@ -115,6 +116,19 @@ def _check_harness(request: RunRequest) -> None:
         _fail("timeout", "is required for an agy exec run")
 
 
+def review_effort(request: RunRequest) -> str | None:
+    """Check the review effort and return the value for identity normalization.
+
+    Antigravity encodes effort in its model. Accept auto and the existing
+    named levels on the request, then let identity read effort from the model.
+    """
+    agy = request.harness is Harness.AGY
+    effort = request.effort
+    if effort not in identity.EFFORTS and not (agy and effort == "auto"):
+        _fail("effort", f"{effort!r} is unsupported for {request.harness.value}")
+    return None if agy else effort
+
+
 def _check_commit(request: RunRequest) -> None:
     review = request.profile is Profile.REVIEW
     if review and request.expect_commit:
@@ -171,6 +185,8 @@ def validate(
     _matches("commit", request.commit, _COMMIT)
     _matches("model", request.model, _MODEL)
     _matches("effort", request.effort, _EFFORT)
+    if request.profile is Profile.REVIEW:
+        review_effort(request)
     _matches("claude_profile", request.claude_profile, NAME)
     _matches("account", request.account, NAME)
     _matches("class", request.class_, NAME)

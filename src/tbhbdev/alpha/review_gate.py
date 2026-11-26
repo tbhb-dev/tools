@@ -21,8 +21,7 @@ MIN_APPROVALS = 2
 MIN_PROVIDERS = 2
 GOOD_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 
-# The one table from a harness name, as a review body or a trailer spells it,
-# to the provider that runs it.
+# Map a trailer harness to its provider.
 PROVIDERS = {
     "claude": "anthropic",
     "claude-code": "anthropic",
@@ -32,9 +31,7 @@ PROVIDERS = {
     "gemini": "google",
 }
 HEAD_SHA = re.compile(r"[0-9a-f]{40}")
-# The review body's last line, which the run host writes: harness, then model,
-# then the head the run judged.
-STAMP = re.compile(r"Run \S+, (\S+) \S+, judged head ([0-9a-f]{40})\.")
+LEGACY_FOOTER = re.compile(r"Run \S+, (\S+) \S+, judged head ([0-9a-f]{40})\.")
 
 
 class Review(TypedDict):
@@ -67,9 +64,17 @@ def provider_of(harness: str) -> str | None:
 
 
 def review_provider(body: str, head: str) -> str | None:
-    """The provider the body's last line names for a run judged at head, or None."""
-    stamp = STAMP.fullmatch(body.rstrip().rpartition("\n")[2])
-    return provider_of(stamp[1]) if stamp and stamp[2] == head else None
+    """Read the approving provider from either host-written footer."""
+    footer = body.rstrip().rpartition("\n")[2]
+    trailers = identity.llm_trailers(footer)
+    if trailers and trailers[0][0] == identity.KEY_GEN:
+        return provider_of(
+            dict(identity.ATTR_PAIR.findall(trailers[0][1])).get("harness", "")
+        )
+    legacy = LEGACY_FOOTER.fullmatch(footer)
+    if legacy and legacy[2] == head:
+        return provider_of(legacy[1])
+    return None
 
 
 def author_providers(messages: Sequence[str]) -> tuple[set[str], list[str]]:

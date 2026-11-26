@@ -5,14 +5,16 @@ import json
 import os
 import re
 import sys
+from importlib.resources import files
 from pathlib import Path
 from typing import cast
 
 import yaml
 from jsonschema import Draft202012Validator
 
+from tbhbdev import content
 from tbhbdev.alpha import pull_request as pr
-from tbhbdev.alpha import review_doc, review_policy, review_threads, run_stop_hook
+from tbhbdev.alpha import review_doc, review_policy, review_threads
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -29,49 +31,36 @@ SCHEMA = {
         "event": {"enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"]},
     },
 }
-LINT_PATH = Path(".github") / "PULL_REQUEST_REVIEW_DRAFT.md"
 # Match rumdl's entire MD041 diagnostic so other line-one alerts stay visible.
 H1_ALERT = "rumdl: [MD041] First line in file should be a level 1 heading"
 HEAD = re.compile(r"[0-9a-fA-F]{40}")
-TEMPLATE = """<!--
-Write plain prose, one line per paragraph and list item. Cite code as `path:line`.
-Remove these guidance comments and any unused optional sections. Write no trailers.
--->
-
-## Summary
-
-<!-- Required, at most 60 words. Give the reasons in one or two sentences.
-The event carries the verdict. -->
-
-## Findings
-
-<!-- Optional, at most 200 words. Blocking issues only, one list item each,
-with `path:line` and what has to change. REQUEST_CHANGES requires findings. -->
-
-## Suggestions
-
-<!-- Optional, at most 120 words. Non-blocking improvements. -->
-
-## Verification
-
-<!-- Required, at most 100 words. What the reviewer read or ran, and the CI
-result it relied on. -->
-"""
-SECTIONS = [
-    pr.Section("Summary", required=True, max_words=60),
-    pr.Section("Findings", required=False, max_words=200),
-    pr.Section("Suggestions", required=False, max_words=120),
-    pr.Section("Verification", required=True, max_words=100),
-]
+TEMPLATE = (
+    files("tbhbdev.alpha")
+    .joinpath("review_data", "PULL_REQUEST_REVIEW_TEMPLATE.md")
+    .read_text(encoding="utf-8")
+)
 
 
-def draft_path(number: int) -> Path:
-    """The review's file under this worktree's git directory."""
+def draft_directory() -> Path:
+    """The directory for reviews in this worktree."""
     code, directory = pr.git("rev-parse", "--git-dir")
     if code != 0:
         message = "review drafts require a git worktree"
         raise SystemExit(message)
-    return Path(directory).resolve() / "tbhb-alpha" / f"review-{number}.md"
+    return Path(directory).resolve() / "tbhb-alpha"
+
+
+def draft_path(number: int, *, directory: Path | None = None) -> Path:
+    """The standard review file under this worktree's git directory."""
+    top = directory if directory is not None else draft_directory()
+    return top / f"review-{number}.md"
+
+
+def select_draft(number: int, *, directory: Path | None = None) -> tuple[Path, bool]:
+    """Return the selected path and whether it uses schema 2 frontmatter."""
+    standard = draft_path(number, directory=directory)
+    document = standard.with_suffix(".doc.md")
+    return (document, True) if document.exists() else (standard, False)
 
 
 def fetch_head(number: int) -> str:
@@ -146,10 +135,7 @@ def draft(number: int, *, force: bool) -> Path:
 
 
 def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]:
-    """Validate review metadata and its title-free body without reading GitHub.
-
-    Run hosts lack the prose linters, so they pass ``lint=False``.
-    """
+    """Validate review metadata and its title-free body without reading GitHub."""
     try:
         data, body = pr.parse_frontmatter(text)
     except pr.FrontmatterError as exc:
@@ -159,51 +145,29 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
     offset = text.count("\n") - body.count("\n")
     schema = {**SCHEMA, "allOf": [{"properties": {"pr": {"const": number}}}]}
     problems = pr.meta_problems(data, offset, text, Draft202012Validator(schema))
-    lines, scanned = pr.scan(body.splitlines(), offset + 1)
-    problems += scanned
-    anchor = pr.Line(
-        offset + 1,
-        "",  # pragma: no mutate -- body_problems reads only the anchor's number
-        "",  # pragma: no mutate -- body_problems reads only the anchor's number
-        code=False,  # pragma: no mutate -- body_problems reads only the number
-    )
-    problems += [
-        (line, "a review must not contain an H1 title")
-        if why == "only one H1 is allowed: the title"
-        else (line, why)
-        for line, why in pr.body_problems(lines, anchor, SECTIONS)
+    if problems:
+        return problems
+    fields = cast("dict[str, object]", data)
+    first = offset + 1
+    problems = [
+        (first, why) for why in content.check_review(body, event=str(fields["event"]))
     ]
-    problems += pr.ref_problems(lines)
-    problems += [
-        (line.no, "keep the final verdict line out of the review body")
-        for line in lines
-        if run_stop_hook.VERDICT.fullmatch(line.raw.strip())
-    ]
-    if isinstance(data, dict) and data.get("event") == "REQUEST_CHANGES":
-        problems += findings_problems(lines, anchor.no)
+    return lint_body(body, first) if lint and not problems else problems
+
+
+def lint_body(body: str, first: int) -> list[pr.Problem]:
     rendered = body.splitlines()
-    first_content = next(
-        (index for index, line in enumerate(rendered, 1) if line.strip()), None
-    )
-    if lint and first_content is not None:
-        problems += pr.lint(
-            rendered,
-            offset + 1,
-            path=LINT_PATH,
-            drop=frozenset({(first_content, H1_ALERT)}),
+    first_content = next(i for i, line in enumerate(rendered, 1) if line.strip())
+    return sorted(
+        set(
+            pr.lint(
+                rendered,
+                first,
+                path=review_doc.LINT_PATH,
+                drop=frozenset({(first_content, H1_ALERT)}),
+            )
         )
-    return sorted(set(problems))
-
-
-def findings_problems(lines: list[pr.Line], first: int) -> list[pr.Problem]:
-    """A request for changes needs a non-empty Findings section."""
-    _, blocks, _ = pr.split_blocks(lines)
-    if any(
-        block.heading == "Findings" and not all(map(pr.is_blank, block.lines))
-        for block in blocks
-    ):
-        return []
-    return [(first, "REQUEST_CHANGES requires non-empty Findings")]
+    )
 
 
 class GhApi:
@@ -236,25 +200,73 @@ def api_author(api: review_doc.Api) -> str:
             raise review_doc.ReviewError(message)
 
 
-def post_draft(number: int, author: str | None) -> int:
-    path = draft_path(number).with_suffix(".doc.md")
-    try:
-        doc = review_doc.parse(path.read_text())
-        if doc.pr != number:
-            message = f"draft must name pull request {number}"
-            raise review_doc.ReviewError(message)
-        repo = pr.origin_repository()
-        if doc.repo != repo:
-            message = f"draft repo {doc.repo} differs from origin repo {repo}"
-            raise review_doc.ReviewError(message)
-        api = GhApi()
-        status, review_id = review_doc.post(
-            api,
-            doc,
-            author=author or api_author(api),
-            identity_value=pr.posting_value(os.environ),
+def post_event_draft(text: str, number: int) -> int | None:
+    if problems := check_text(text, number, lint=False):
+        raise review_doc.ReviewError(
+            "\n".join(f"line {n}: {why}" for n, why in problems)
         )
-    except (OSError, SystemExit, ValueError) as exc:
+    meta, body = pr.parse_frontmatter(text)
+    fields = cast("dict[str, object]", meta)
+    event = str(fields["event"])
+    if event not in {"APPROVE", "REQUEST_CHANGES"}:
+        message = "set event to APPROVE or REQUEST_CHANGES to post a decision"
+        raise review_doc.ReviewError(message)
+    commit = str(fields["commit_id"]).lower()
+    if problems := review_doc.lint_post(body):
+        raise review_doc.ReviewError("\n".join(problems))
+    repo = pr.origin_repository()
+    path = f"repos/{repo}/pulls/{number}"
+    api = GhApi()
+    review_doc.check_head(api, path, commit)
+    trailer = review_doc.attribution(pr.posting_value(os.environ))
+    prose = body.strip("\n")
+    return review_doc.send_review(api, path, commit, f"{prose}\n\n{trailer}\n", event)
+
+
+def parse_document(text: str, number: int) -> review_doc.ReviewDoc:
+    doc = review_doc.parse(text)
+    if doc.pr != number:
+        message = f"draft must name pull request {number}"
+        raise review_doc.ReviewError(message)
+    return doc
+
+
+def check_document(text: str, number: int, *, lint: bool) -> list[pr.Problem]:
+    try:
+        doc = parse_document(text, number)
+    except review_doc.ReviewError as exc:
+        return [(1, str(exc))]
+    first = text.count("\n") - doc.body.count("\n") + 1
+    problems = [
+        (first, why) for why in content.check_review(doc.body, metadata=doc.metadata)
+    ]
+    return lint_body(doc.body, first) if lint and not problems else problems
+
+
+def post_document(text: str, number: int, author: str | None) -> tuple[str, int | None]:
+    doc = parse_document(text, number)
+    repo = pr.origin_repository()
+    if doc.repo != repo:
+        message = f"draft repo {doc.repo} differs from origin repo {repo}"
+        raise review_doc.ReviewError(message)
+    api = GhApi()
+    return review_doc.post(
+        api,
+        doc,
+        author=author or api_author(api),
+        identity_value=pr.posting_value(os.environ),
+    )
+
+
+def post_draft(number: int, author: str | None) -> int:
+    path, document = select_draft(number)
+    try:
+        text = path.read_text()
+        if document:
+            status, review_id = post_document(text, number, author)
+        else:
+            status, review_id = "posted", post_event_draft(text, number)
+    except (OSError, RecursionError, SystemExit, ValueError) as exc:
         for problem in str(exc).splitlines():
             print(f"{path}: {problem}", file=sys.stderr)
         return 1
@@ -334,13 +346,14 @@ def main(argv: list[str], prog: str) -> int:
     if args.command == "draft":
         print(draft(args.number, force=args.force))
         return 0
-    path = draft_path(args.number)
+    path, document = select_draft(args.number)
     try:
         text = path.read_text()
     except (OSError, UnicodeError) as exc:
         problems = [(1, f"cannot read draft: {exc}")]
     else:
-        problems = check_text(text, args.number, lint=not args.no_lint)
+        check_draft = check_document if document else check_text
+        problems = check_draft(text, args.number, lint=not args.no_lint)
     for line, why in problems:
         print(f"{path}:{line}: {why}", file=sys.stderr)
     return 1 if problems else 0
