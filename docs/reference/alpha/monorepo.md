@@ -1,5 +1,5 @@
 ---
-description: Mapping a public repository's files at one commit for import into the monorepo.
+description: Mapping a public repository's files at one commit and importing them into the monorepo.
 generated:
   - role: generated
     harness: claude-code
@@ -28,3 +28,18 @@ The map is TOML. A person or agent edits it before the import, and TOML takes co
 The default map drops the root configuration that the monorepo's shared roots replace, and gives the matching pattern as the reason. The patterns come from the root of tbhb-dev/tools and sit in the `ROOT_CONFIG` table of the map module. They cover the Bazel and Mise files, lock files, lint, spelling, prose, and editor settings, the Renovate files, the license files, `REUSE.toml`, and the repository's workflows, rulesets, `CODEOWNERS`, and workflow linter settings. A pattern matches the whole path, and `*` stays within one folder. The default map keeps everything else, including the agent instruction files, `pyproject.toml`, and the build files, which a person reviews.
 
 Every destination is a clean relative path under the folder, with no `..` and no `.git`.
+
+## Import
+
+`import CLONE@COMMIT --map MAP --into MONOREPO` writes the copied and rewritten files of the map into the monorepo clone and makes one commit. Pushing and opening the pull request stay with the caller. `CLONE@COMMIT` splits at its last `@`, and the map must record the same full commit.
+
+Before it writes anything, the command refuses when any of these hold:
+
+- The map misses a source file, lists one the commit lacks, doesn't parse, lists a source twice, or writes a path twice.
+- The monorepo clone has uncommitted changes.
+- A destination file already exists in the clone.
+- The commit subject would pass 72 characters.
+
+An import never overwrites a file. `--into` can be any folder of the clone, and destinations are relative to the clone's root. It also refuses a destination that leads outside the map's folder through a symbolic link in the clone. When a write fails, it removes the files it already wrote. Files keep the source's bytes and executable bit, and a symbolic link in the source stays a symbolic link with the same target. A `replace` pair whose old text isn't in the file is an error, because a stale map would otherwise copy the file unchanged.
+
+Subjects read `feat(FOLDER): import REPO at SHORT`, with the repository name and the first 7 characters of the hash. Its body gives the source repository and the full commit hash, then counts the copied, rewritten, and dropped files. Hooks of the monorepo clone run on the commit, which has no parent in the source repository. Exit code 0 is success. Exit code 2 is a refusal or a Git error.
