@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+# cspell:ignore goldens adoc
+# Path globs, matched against the path, /path, or basename.
+MODULE.bazel.lock
+go.sum
+pnpm-lock.yaml
+uv.lock
+Cargo.lock
+vendor/*
+third_party/*
+*/testdata/*
+*/fixtures/*
+*/golden/*
+*/goldens/*
+*/snapshots/*
+*/__snapshots__/*
+*.golden
+*.golden.*
+*.snap
+# Prose languages are exempt; raw-only languages count only toward raw.
+# All other scc languages count toward both limits.
+[prose]
+Markdown
+Plain Text
+CSV
+License
+AsciiDoc
+ReStructuredText
+[raw-only]
+*JSON*
+YAML
+TOML
+INI
+Dockerfile
+Docker ignore
+gitignore
+ignore
+Properties File
+XML*
+SVG
+HTML

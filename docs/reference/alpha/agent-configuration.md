@@ -2,12 +2,12 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    effort: high
     harness: codex:0.171.0
     model: openai:gpt-6.1-sol
+    effort: high
     surface: exec
-    session: sha-256-64:a3cd796ae7be831f
-    at: "2026-11-26T05:01:24Z"
+    session: sha-256-64:991d7464a94ac2e1
+    at: "2026-11-26T06:45:17Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -28,7 +28,7 @@ The build profile enables `--expect-commit` by default. If the harness succeeds 
 
 The Stop hook checks the run worktree for uncommitted tracked changes and the run branch for a commit past its starting point. Use `agent exec --no-expect-commit` for a build that can finish without a new commit; the worktree still has to be clean of tracked changes. For reviews, the hook requires a standalone `VERDICT: GO`, `VERDICT: BLOCK` or `VERDICT: NO-GO` line in the final reply, with an optional full commit SHA. The hook asks the model to continue up to three times per run, then allows the stop and logs the reason.
 
-Pass `--ref <full sha>` to launch a review and include `--reason` when you use Claude. Leave a valid review draft. For headless reviews without `--schema`, end the final answer with a last line `VERDICT: GO`, `VERDICT: BLOCK` or `VERDICT: NO-GO`, optionally followed by the reviewed commit's full sha. `BLOCK` and `NO-GO` mean the same. A sha that differs from the run's commit is refused. If the harness succeeds but the host does not post the review, the run exits 10. The log starts the reason with `review not posted:`, for example when the verdict line is missing, the pull request head moved before an approval, or GitHub refused the POST.
+Pass `--ref <full sha>` to launch a review and include `--reason` when you use Claude. A missing or empty `--ref` refuses the launch before contacting the host. Leave a valid review draft. For headless reviews without `--schema`, end the final answer with a last line `VERDICT: GO`, `VERDICT: BLOCK` or `VERDICT: NO-GO`, optionally followed by the reviewed commit's full sha. `BLOCK` and `NO-GO` mean the same. A sha that differs from the run's commit is refused. If the harness succeeds but the host does not post the review, the run exits 10. The log starts the reason with `review not posted:`, for example when the verdict line is missing, the pull request head moved before an approval, or GitHub refused the POST.
 
 After workspace preparation, a build run reads the repository’s hook configs for references to Bazel shim directories and executables. If a referenced directory is missing, the host reports phase `shims` and uses `bazelisk` or `bazel` to run the `bazel_env` target for each referenced directory’s package, with a 10-minute timeout per target. The harness can start once the referenced executables exist, or once the directory exists if the hooks reference only the directory, even if Bazel returns a nonzero status. Review runs and preflight checks skip this step.
 
@@ -68,7 +68,31 @@ The run clone has its own copy of the mirror's object store. The mirror never pr
 
 Every `agent exec` run has the agent account’s full access. The account supplies the boundary for Codex, Claude and agy, for both build and review profiles. Runs skip sandbox grants, denied-path overlap checks, executable trust checks and write-root audits. The launcher offers no sandboxed mode.
 
-`tbhbdev alpha install` registers Stop alongside the other user-level hooks for Claude, Codex, and Antigravity. Headless Claude runs use their generated settings with the Stop hook enabled and skip user and project settings. Unsandboxed Claude runs use `bypassPermissions`. Headless Codex runs install and trust the Stop hook in their private configuration. Codex marks each run clone as untrusted, which skips its project configuration. Antigravity runs use the installed user-level Stop hook.
+`tbhbdev alpha install` registers Stop alongside the other user-level hooks for Claude, Codex, and Antigravity. Headless Claude runs use their generated settings and skip user and project settings. Those settings enable hooks for the Stop hook and for one guard hook (see subagent models below). Unsandboxed Claude runs use `bypassPermissions`. Headless Codex runs install and trust the Stop hook in their private configuration. Codex marks each run clone as untrusted, which skips its project configuration. Antigravity runs use the installed user-level Stop hook.
+
+A run may launch subagents on any model, and every launch should name its model. Nothing pins a model, so each launch chooses its own. Each harness gets the strongest control it has, and the controls differ in strength. Only Claude's is enforced:
+
+| Harness | Control | Enforcement |
+| --- | --- | --- |
+| Claude | Settings register the `tbhbdev alpha guard-agent-model` PreToolUse hook with matcher `Agent`. It refuses a launch with no `model`, and a fork when the session's model is costly (an id with `opus` or `fable`) or can't be read, and allows any named model. Settings `env` also holds `CLAUDE_CODE_FORK_SUBAGENT=0`, which turns forks off. The run keeps subagents: `permissions.deny` doesn't hold `Agent`, and `CLAUDE_CODE_SUBAGENT_MODEL` isn't set. The hook runs the host's `tbhbdev` path, or `.local/bin/tbhbdev` in the account's home. | Enforced by the hook. The hook entry sets `onFailure: "block"`, so a hook that can't start, times out or crashes blocks the launch instead of letting it through. The run host's own `tbhbdev` install check stands behind it. |
+| Codex | `-c agents.default_subagent_model=<[agent.codex] subagent_model>` always, and `gpt-6.1-sol` when the key is unset. Subagents stay on. The rendered brief tells the run to set `fork_turns` to `"none"` and name `model` on every `spawn_agent` call, and never to spawn a full-history fork. | The default is a configuration default, not enforcement. The brief's rule is a prompt rule: nothing stops a spawn that omits `model` or `fork_turns`. By the Codex 0.171.0 source, a spawn that omits `model` still gets the configured default, a full-history fork included. No run confirmed this. |
+| agy | The rendered brief tells the run not to call `invoke_subagent` or `define_subagent`. | A prompt rule, not enforcement. Nothing can be enforced today, and a subagent defaults to the run's model. |
+
+Codex's `spawn_agent` tool takes optional `model`, `reasoning_effort` and `fork_turns` fields. This is what the Codex 0.171.0 source shows, read at tag `rust-v0.171.0` (`codex-rs/core/src/agent/child_config.rs`, `codex-rs/core/src/thread_spawn.rs` and `codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs`):
+
+- An omitted or empty `fork_turns` counts as `"all"`, so the default spawn is a full-history fork. `"none"` starts a fresh child.
+- `prepare_agent_spawn_config` applies the requested model, or `agents.default_subagent_model` when the call names none, before the fork-dependent role handling. It does so for a full-history fork and for a fresh spawn alike, and nothing there rejects a model override on a fork. The spawn fails if the model isn't in the spawn tool's catalog of picker-visible models.
+- A full-history fork therefore gets the history of its parent, and the model the call names, or the configured default.
+
+The source doesn't say whether a fork can still inherit anything of the parent's model besides the history when `model` and the default are both unset. With the launcher's default always set, that case doesn't arise for runs the launcher starts.
+
+Not verified: the installed binary at `~/.local/share/codex/0.171.0/` is the build of that tag, and no run on this host spawned a subagent to see which model it used, because a spawn is a billed run. The source reading is the only evidence for the claims above. The earlier text of this page said a full-history fork takes no override and bypasses the default, and that came from strings in the binary and from `codex debug prompt-input`. Text injected into a prompt says nothing of runtime behavior, and the source contradicts that claim. The binary also holds no config key, flag or feature switch that turns full-history forks off or forces `fork_turns` (`--disable multi_agent_v2` leaves the rendered prompt unchanged), which is why the brief asks for `fork_turns` of `"none"`. The tool's own text tells a model not to set `model` unless the user, `AGENTS.md` or a skill asks, so the brief's rule is the request that lets a run name one.
+
+A Codex run that ignores the brief's rule gets the configured default model on its subagents, whether the spawn forks or not, if the source reading holds. The rule's value is then in keeping the history out of a child and in naming the model, not in avoiding a model bypass. A Codex review run on `gpt-6.1-sol` defaults its subagents to its own model, which is intended there because `gpt-6.1-sol` isn't a costly model. The `gpt-6.1-sol` default is the Codex model that tbhb-dev/wiki `models/README.md` names for routine work: line 45 for building, line 58 as Sonnet's Codex match. The wiki holds `gpt-6.2-sol` as unverified in line 73.
+
+agy has no setting, permission rule or per-run hook for subagents. Its hooks load from `~/.gemini/config/hooks.json` or the project's `.agents/hooks.json`, and not from `--settings`, so a hook there would apply to every agy session of the account and not to one run. Until agy has a per-run control, only a prompt rule backs the claim that its runs launch no subagents: the rendered brief says not to, and nothing stops a run that ignores it. The rule names `invoke_subagent` and `define_subagent`. It covers the `run_workflow` and `swarm` launch paths by its wording alone ("Do not launch subagents"), since it doesn't name them. The rule is stricter than the model rule above, because the launcher can't see which model a launch names, but it is not enforced.
+
+`[agent.codex] subagent_model` is optional text that names a model as Codex spells it. `[agent.claude]` has no subagent key, and a config that sets one fails with `not recognized`.
 
 Run-host records phase `unknown` when it can't prove the group stopped and appends cleanup messages to the log. A review with unconfirmed shutdown skips posting.
 
@@ -102,6 +126,7 @@ build_write = [".local/state/mise", ".local/share/mise"]
 
 [agent.codex]
 web_search = { build = "live", review = "live" }
+# subagent_model = "example-model"
 
 [agent.otel]
 endpoint = "http://otlp.example.net:4318"
@@ -162,7 +187,7 @@ During the build probe, the installed identity hook stamps a commit with a `Gene
 
 The settings have these constraints:
 
-- The connection settings default to `ssh_connect_timeout = 15`, `ssh_keepalive_seconds = 30` and `ssh_keepalive_count_max = 3`. Each is a positive integer. Codex's `web_search` also has a default. The `[agent.codex]` table and each of its keys are optional, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
+- The connection settings default to `ssh_connect_timeout = 15`, `ssh_keepalive_seconds = 30` and `ssh_keepalive_count_max = 3`. Each is a positive integer. Codex's `web_search` also has a default. The `[agent.codex]` table and each of its keys are optional, `subagent_model` in it defaults to `gpt-6.1-sol`, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
 - `[agent.otel]` is optional and takes one key, `endpoint`, a base URL with no credentials, path, query or fragment. Use `http` for a private-network collector such as `http://otlp.example.net:4318`, and use `https` elsewhere. For either scheme, the host must appear in `[agent.sandbox] network_domains`. That list matches hosts only, so it limits no port. The parser refuses control characters, a non-numeric, zero, zero-padded or out-of-range port and a malformed authority and quotes nothing from the value in its error. With it set, each Codex run's private `CODEX_HOME` gets a `config.toml` with an `[otel]` table that exports traces to `<endpoint>/v1/traces` and metrics to `<endpoint>/v1/metrics` over `otlp-http`. The table has no headers and sets `log_user_prompt = false`. It leaves the log exporter off, because Codex logs tool arguments and an output preview, which can hold a credential or a file's contents, and `log_user_prompt` guards only the prompt text. Whether to export logs is a later decision. Every run with an endpoint also gets `OTEL_RESOURCE_ATTRIBUTES` with `host.name`, `tbhb.account` and `tbhb.run.id`, and a run without one gets neither the file nor the variable. Tests check the generated file and the variable. A live check against codex-cli 0.167.2 loaded the generated file from a scratch `CODEX_HOME` and accepted it, and the same file with `protocol` set to an invalid value failed with `unknown variant` at `otel.trace_exporter.protocol`, so Codex reads the exporter tables as written. The export itself is unverified end to end, as are two claims about Codex: that it honors the endpoint, and that its traces leave out tool arguments. The private `CODEX_HOME` has mode `0700`. The table contains only the endpoint URL and the prompt flag, so the endpoint's reachability is the boundary.
 - `launch_wait_seconds`, `kill_grace_seconds` and `max_run_minutes` are positive integers. `agy_timeout` and the optional `agy_build_timeout` are bare seconds or a duration ending in `s`, `m` or `h`, up to 7 days. An agy review run uses `agy_timeout`, and an agy build run uses `agy_build_timeout`, which defaults to `3600s`. `--timeout` overrides both.
 - Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.

@@ -3,10 +3,8 @@ description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
     harness: codex:0.171.0
-    model: openai:gpt-6.2-sol
-    surface: exec
-    session: sha-256-64:6e402d15023f0de1
-    at: "2026-11-26T01:38:57Z"
+    model: openai:gpt-6.1-sol
+    at: "2026-11-26T04:49:19Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -42,7 +40,7 @@ type: Reference
 - `gh-app` requests a GitHub App installation token, reading the App's id and RSA key through Connect, and keeps it under `$XDG_STATE_HOME/gh-app/VAULT/APP`. `--permissions NAME:read,NAME:write` narrows the token to those permissions, such as `contents:read`, and keeps it in its own directory, so a narrowed token and a full one never replace each other. The command serves a cached token with more than ten minutes left, even during a cooldown, and a cooldown refuses any other request. Only a 404 sends the installation lookup from the repository to its owner. The command syncs each file to disk before it replaces the old one.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` merges an approved pull request, with a merge commit when the repository allows one and a squash otherwise.
-- `monorepo map CLONE COMMIT --dest FOLDER` writes the path map for importing a public repository into the monorepo. See [Monorepo import](monorepo.md).
+- `monorepo map CLONE COMMIT --dest FOLDER` writes the path map for importing a public repository into the monorepo, and `monorepo import CLONE@COMMIT --map MAP --into CLONE` makes the import commit. See [Monorepo import](monorepo.md).
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `signing-parity` checks that each configured host's signing key is a signing key of tbhb-agent. It runs the hidden host command `signing-fingerprint ACCOUNT`, which prints only the SHA256 fingerprint of the key a run would sign with, over the ordinary ssh shell. It then reads tbhb-agent's public signing key list from GitHub and exits 1 when any host's fingerprint is missing or the host is unreachable. A host without the command counts as unreachable until `tbhbdev` syncs there. The package also includes the run request's schema and the repo argument rules.
@@ -54,7 +52,9 @@ From a detected agent session, every branch creation or update must target a rem
 
 `tbhbdev alpha pr rebase N [N...]` asks Renovate to rebase open pull requests in the repository named by `origin`. It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body. It skips checked boxes and stops at the first failure.
 
-`tbhbdev alpha pr check` and `pr create` run the rules size counter after linting the draft, comparing the draft's base branch on `origin` with `HEAD`. A missing remote-tracking ref is fetched once. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
+`tbhbdev alpha pr check` and `pr create` compare the draft's base branch on `origin` with `HEAD` after linting the draft. They run a bundled copy of the rules size counter through Bash and `scc` 4.1.0, without starting Bazel. The base remote-tracking ref is refreshed once, except in a dry run. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
+
+Install `scc` with `mise install`; the Bazel tool shims also provide it. The count uses a three-dot diff and the same exemption policy as CI: lockfiles, generated and vendored files, test data, snapshots and prose are exempt; configuration languages count only toward the raw limit. `.github/pr-size-exempt.txt` adds repository path globs.
 
 `tbhbdev alpha pr checks N` reads pull request N in the current repository. It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses. Unfinished checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`, `REQUESTED` or a pending commit status) print `PENDING`. Exit code 0 means every check is green: `SUCCESS`, `NEUTRAL` or `SKIPPED`. Exit code 1 means a failed check, any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion), or no checks at all. Exit code 3 means nothing failed but a check is still unfinished. A check run that hasn't completed reads its status and never its conclusion. A commit status is green only for `SUCCESS`. A missing pull request, a failed read or a check with no name exits nonzero with an error.
 
