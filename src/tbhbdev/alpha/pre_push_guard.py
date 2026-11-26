@@ -218,6 +218,26 @@ def fetched_tip(remote: str, ref: str) -> str:
     return "" if code else out
 
 
+def destination_problem(ref: str, *, deleting: bool, agent_push: bool) -> str:
+    """The refusal for a disallowed push destination, or empty when allowed."""
+    if (name := os.environ.get(RUN_NAME_ENV)) and ref.startswith("refs/heads/"):
+        branch = f"refs/heads/agent/{name}"
+        if ref != branch:
+            return f"{ref}: this run may only push {branch}"
+    if ref in PROTECTED:
+        message = (
+            "push to a protected branch refused; "
+            "push a new branch and open a pull request"
+        )
+        return f"{ref}: {message}"
+    if agent_push and ref.startswith("refs/heads/"):
+        if deleting and not ref.startswith(AGENT_BRANCH_PREFIX):
+            return f"{ref}: deletion refused; agents may delete only agent/ branches"
+        if not ref.startswith(AGENT_BRANCH_PREFIXES):
+            return f"{ref}: push refused; push to an agent/<name> branch instead"
+    return ""
+
+
 def ref_problems(
     remote: str,
     row: tuple[str, str, str],
@@ -228,22 +248,9 @@ def ref_problems(
 ) -> list[str]:
     """The refusals for one pushed ref: LOCAL, REF, and the remote's OLD value."""
     local, ref, old = row
-    if (name := os.environ.get(RUN_NAME_ENV)) and ref.startswith("refs/heads/"):
-        branch = f"refs/heads/agent/{name}"
-        if ref != branch:
-            return [f"{ref}: this run may only push {branch}"]
-    if ref in PROTECTED:
-        message = (
-            "push to a protected branch refused; "
-            "push a new branch and open a pull request"
-        )
-        return [f"{ref}: {message}"]
     deleting = not local.strip("0")
-    if agent_push and ref.startswith("refs/heads/"):
-        if deleting and not ref.startswith(AGENT_BRANCH_PREFIX):
-            return [f"{ref}: deletion refused; agents may delete only agent/ branches"]
-        if not ref.startswith(AGENT_BRANCH_PREFIXES):
-            return [f"{ref}: push refused; push to an agent/<name> branch instead"]
+    if problem := destination_problem(ref, deleting=deleting, agent_push=agent_push):
+        return [problem]
     if deleting:
         return []
     exclude = known_objects([*tips, old] if old.strip("0") else list(tips))
