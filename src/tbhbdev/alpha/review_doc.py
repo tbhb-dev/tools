@@ -37,6 +37,17 @@ _MARKER = re.compile(
 _PAGE_SIZE = 100
 _MARKER_SYNTAX = re.compile(r"<!--\s*tbhb-(?:review|reply)\b", re.IGNORECASE)
 _REASON_LIMIT = 200
+_VERDICT_WORD = r"(?:NO-GO|GO|APPROVED?|BLOCK|HOLD|REQUEST_CHANGES)"
+_WORD_END = r"(?=$|[\s`*.:!?,;–—]|_+(?!\w))"  # noqa: RUF001
+_LABELED_VERDICT = rf"(?<![^\W_])verdict[`*_]*\s*:[\s`*_]*{_VERDICT_WORD}{_WORD_END}"
+VERDICT_LINE = re.compile(
+    rf"\s*(?:>\s*|[-*+]\s+)?[`*_]*{_LABELED_VERDICT}", re.IGNORECASE
+)
+SUMMARY_VERDICT = re.compile(
+    rf"{_LABELED_VERDICT}|^\s*[`*_]*{_VERDICT_WORD}{_WORD_END}"
+    rf"|[.!?;][`*_]*\s+[`*_]*{_VERDICT_WORD}[`*_]*(?:[ \t]*$|[.:!?–—])",  # noqa: RUF001
+    re.IGNORECASE,
+)
 
 
 class ReviewError(ValueError):
@@ -67,6 +78,7 @@ class ReviewDoc:
     head_sha: str
     tier: Tier
     verdict: Verdict
+    summary: str
     run: Run
     findings: tuple[Finding, ...]
     verification: str
@@ -148,21 +160,17 @@ def _parse_finding(line: str) -> Finding:
     return Finding(kind, path, line_number, summary)
 
 
-def _parse_body(body: str, repo: str, pr: int) -> ReviewDoc:
+def _parse_body(body: str, repo: str, pr: int, verdict: Verdict) -> ReviewDoc:
     sections = re.split(r"^## (.*)$", body, flags=re.MULTILINE)
-    if sections[1::2] != ["Verdict", "Findings", "Verification"]:
-        message = "expected Verdict, Findings, and Verification sections in order"
+    if sections[1::2] != ["Summary", "Findings", "Verification"]:
+        message = "expected Summary, Findings, and Verification sections in order"
         raise ReviewError(message)
-    header, verdict, findings, verification = sections[::2]
+    header, summary, findings, verification = sections[::2]
     match = _HEADER.fullmatch(header.lstrip("\n"))
     if match is None:
         message = "expected the seven run header lines"
         raise ReviewError(message)
     name, provider, model, variant, host, head, tier = match.groups()
-    verdict = verdict.strip()
-    if verdict not in ("GO", "NO-GO"):
-        message = "expected a GO or NO-GO verdict"
-        raise ReviewError(message)
     tier_number = int(tier)
     parsed_tier = cast("Tier", tier_number)  # pragma: no mutate -- runtime no-op
     run_variant = cast("Variant", variant)  # pragma: no mutate -- runtime no-op
@@ -172,6 +180,7 @@ def _parse_body(body: str, repo: str, pr: int) -> ReviewDoc:
         head,
         parsed_tier,
         verdict,
+        summary.strip("\n"),
         Run(name, provider, model, run_variant, host),
         tuple(_parse_finding(line) for line in findings.strip("\n").splitlines()),
         verification.strip("\n"),
@@ -196,7 +205,11 @@ def parse(text: str) -> ReviewDoc:
         case {"schema": int(2), "repo": str(repo), "pr": int(pr), **supplied} if (
             type(pr) is int
         ):
-            doc = _parse_body(body, repo, pr)
+            verdict = supplied.pop("verdict", None)
+            if verdict not in ("GO", "NO-GO"):
+                message = "expected a GO or NO-GO verdict in frontmatter"
+                raise ReviewError(message)
+            doc = _parse_body(body, repo, pr, verdict)
         case _:
             message = "expected schema 2 frontmatter with repo and integer pr"
             raise ReviewError(message)
@@ -223,7 +236,7 @@ def _body(doc: ReviewDoc) -> str:
         f"Host: {doc.run.host}\n"
         f"Head: {doc.head_sha}\n"
         f"Tier: {doc.tier}\n\n"
-        f"## Verdict\n\n{doc.verdict}\n\n"
+        f"## Summary\n\n{doc.summary.rstrip('\n')}\n\n"
         f"## Findings\n{findings}\n"
         f"## Verification\n\n{doc.verification.rstrip('\n')}\n"
     )
@@ -240,9 +253,12 @@ def validate(doc: ReviewDoc) -> list[str]:
             errors.append("GO forbids BLOCK findings")
         if doc.verdict == "NO-GO" and not has_block:
             errors.append("NO-GO requires at least one BLOCK finding")
-        errors.extend(
-            content.check_review(_body(doc), metadata=_metadata(doc, visible=True))
-        )
+        if any(map(SUMMARY_VERDICT.search, doc.summary.splitlines())):
+            errors.append("Summary must give reasons without stating the verdict")
+        body = _body(doc)
+        if any(map(VERDICT_LINE.match, body.splitlines())):
+            errors.append("keep the final verdict line out of the review body")
+        errors.extend(content.check_review(body, metadata=_metadata(doc, visible=True)))
     except Exception as exc:  # noqa: BLE001 -- Validation returns diagnostics.
         errors.append(f"Review validation could not run: {exc}")
     return errors

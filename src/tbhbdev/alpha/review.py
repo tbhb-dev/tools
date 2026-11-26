@@ -37,9 +37,10 @@ Write plain prose, one line per paragraph and list item. Cite code as `path:line
 Remove these guidance comments and any unused optional sections. Write no trailers.
 -->
 
-## Verdict
+## Summary
 
-<!-- Required, at most 60 words. The event and one or two reasons for it. -->
+<!-- Required, at most 60 words. Give the reasons in one or two sentences.
+The event carries the verdict. -->
 
 ## Findings
 
@@ -56,7 +57,7 @@ with `path:line` and what has to change. REQUEST_CHANGES requires findings. -->
 result it relied on. -->
 """
 SECTIONS = [
-    pr.Section("Verdict", required=True, max_words=60),
+    pr.Section("Summary", required=True, max_words=60),
     pr.Section("Findings", required=False, max_words=200),
     pr.Section("Suggestions", required=False, max_words=120),
     pr.Section("Verification", required=True, max_words=100),
@@ -172,8 +173,10 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
         for line, why in pr.body_problems(lines, anchor, SECTIONS)
     ]
     problems += pr.ref_problems(lines)
+    _, blocks, _ = pr.split_blocks(lines)
+    problems += verdict_problems(lines, blocks)
     if isinstance(data, dict) and data.get("event") == "REQUEST_CHANGES":
-        problems += findings_problems(lines, anchor.no)
+        problems += findings_problems(blocks, anchor.no)
     rendered = body.splitlines()
     first_content = next(
         (index for index, line in enumerate(rendered, 1) if line.strip()), None
@@ -188,9 +191,24 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
     return sorted(set(problems))
 
 
-def findings_problems(lines: list[pr.Line], first: int) -> list[pr.Problem]:
+def verdict_problems(lines: list[pr.Line], blocks: list[pr.Block]) -> list[pr.Problem]:
+    """Keep verdict statements out of the Summary and final lines out of the body."""
+    problems = [
+        (line.no, "Summary must give reasons without stating the verdict")
+        for block in blocks
+        if block.heading == "Summary"
+        for line in block.lines
+        if review_doc.SUMMARY_VERDICT.search(line.text)
+    ]
+    return problems + [
+        (line.no, "keep the final verdict line out of the review body")
+        for line in lines
+        if review_doc.VERDICT_LINE.match(line.raw)
+    ]
+
+
+def findings_problems(blocks: list[pr.Block], first: int) -> list[pr.Problem]:
     """A request for changes needs a non-empty Findings section."""
-    _, blocks, _ = pr.split_blocks(lines)
     if any(
         block.heading == "Findings" and not all(map(pr.is_blank, block.lines))
         for block in blocks

@@ -2,12 +2,12 @@
 description: Review drafts, threads, policy checks and the run host's review posting.
 generated:
   - role: generated
-    harness: claude-code:2.1.319
-    model: anthropic:claude-sonnet-5-5
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
     effort: high
-    surface: sdk-cli
-    session: sha-256-64:e23dce32b8825437
-    at: "2026-11-26T03:16:54Z"
+    surface: exec
+    session: sha-256-64:9d08744b354d28e7
+    at: "2026-11-26T15:04:20Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -17,6 +17,7 @@ type: Reference
 # Review commands
 
 `review draft N` and `review check N` create and check a review draft.
+The Summary gives the reasons for the review in one or two sentences. The review event carries the verdict.
 `review post N [--author LOGIN]` submits a review document as a comment.
 `review dismiss N REVIEW_ID --reason TEXT` marks a review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
 See [Review drafts](../review-drafts.md) for the formats and checks.
@@ -46,5 +47,6 @@ A draft with a repeated frontmatter key is refused.
 The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned commit.
 Before an approval it reads the pull request head once and refuses if the head differs.
 A request for changes requires non-empty findings.
+The host reads the run's final verdict line separately from the draft body for headless runs without an output schema.
 Any 2xx answer counts as posted.
 The review body ends with the run name, harness, model and judged head.

@@ -28,6 +28,8 @@ def test_brief_and_launch() -> None:
     assert "`event: APPROVE` for GO" in review
     assert "`event: REQUEST_CHANGES` for BLOCK or HOLD" in review
     assert "non-empty Findings for a change request" in review
+    assert "In Summary, give one or two sentences of reasons" in review
+    assert "Keep the final verdict line in your final answer only" in review
     assert "`tbhbdev alpha review check N --no-lint`" in review
     assert "exactly one `.git/tbhb-alpha/review-N.md`" in review
     assert review.endswith("\nexample")
