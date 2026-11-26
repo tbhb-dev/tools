@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import pull_request as pr
-from tbhbdev.alpha import review_doc, review_policy, review_threads
+from tbhbdev.alpha import review_doc, review_policy, review_threads, run_stop_hook
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -173,10 +174,13 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
         for line, why in pr.body_problems(lines, anchor, SECTIONS)
     ]
     problems += pr.ref_problems(lines)
-    _, blocks, _ = pr.split_blocks(lines)
-    problems += verdict_problems(lines, blocks)
+    problems += [
+        (line.no, "keep the final verdict line out of the review body")
+        for line in lines
+        if run_stop_hook.VERDICT.fullmatch(line.raw.strip())
+    ]
     if isinstance(data, dict) and data.get("event") == "REQUEST_CHANGES":
-        problems += findings_problems(blocks, anchor.no)
+        problems += findings_problems(lines, anchor.no)
     rendered = body.splitlines()
     first_content = next(
         (index for index, line in enumerate(rendered, 1) if line.strip()), None
@@ -191,24 +195,9 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
     return sorted(set(problems))
 
 
-def verdict_problems(lines: list[pr.Line], blocks: list[pr.Block]) -> list[pr.Problem]:
-    """Keep verdict statements out of the Summary and final lines out of the body."""
-    problems = [
-        (line.no, "Summary must give reasons without stating the verdict")
-        for block in blocks
-        if block.heading == "Summary"
-        for line in block.lines
-        if review_doc.SUMMARY_VERDICT.search(line.text)
-    ]
-    return problems + [
-        (line.no, "keep the final verdict line out of the review body")
-        for line in lines
-        if review_doc.VERDICT_LINE.match(line.raw)
-    ]
-
-
-def findings_problems(blocks: list[pr.Block], first: int) -> list[pr.Problem]:
+def findings_problems(lines: list[pr.Line], first: int) -> list[pr.Problem]:
     """A request for changes needs a non-empty Findings section."""
+    _, blocks, _ = pr.split_blocks(lines)
     if any(
         block.heading == "Findings" and not all(map(pr.is_blank, block.lines))
         for block in blocks
@@ -247,48 +236,25 @@ def api_author(api: review_doc.Api) -> str:
             raise review_doc.ReviewError(message)
 
 
-def post_event_draft(text: str, number: int) -> int | None:
-    if problems := check_text(text, number, lint=False):
-        raise review_doc.ReviewError(
-            "\n".join(f"line {n}: {why}" for n, why in problems)
-        )
-    meta, body = pr.parse_frontmatter(text)
-    fields = cast("dict[str, object]", meta)
-    event = str(fields["event"])
-    if event not in {"APPROVE", "REQUEST_CHANGES"}:
-        message = "set event to APPROVE or REQUEST_CHANGES to post a decision"
-        raise review_doc.ReviewError(message)
-    commit = str(fields["commit_id"]).lower()
-    repo = pr.origin_repository()
-    path = f"repos/{repo}/pulls/{number}"
-    api = GhApi()
-    review_doc.check_head(api, path, commit)
-    return review_doc.send_review(api, path, commit, body.strip("\n") + "\n", event)
-
-
-def post_document(text: str, number: int, author: str | None) -> tuple[str, int | None]:
-    doc = review_doc.parse(text)
-    if doc.pr != number:
-        message = f"draft must name pull request {number}"
-        raise review_doc.ReviewError(message)
-    repo = pr.origin_repository()
-    if doc.repo != repo:
-        message = f"draft repo {doc.repo} differs from origin repo {repo}"
-        raise review_doc.ReviewError(message)
-    api = GhApi()
-    return review_doc.post(api, doc, author=author or api_author(api))
-
-
 def post_draft(number: int, author: str | None) -> int:
-    standard = draft_path(number)
-    path = standard.with_suffix(".doc.md")
+    path = draft_path(number).with_suffix(".doc.md")
     try:
-        if not path.exists() and standard.exists():
-            path = standard
-            status, review_id = "posted", post_event_draft(path.read_text(), number)
-        else:
-            status, review_id = post_document(path.read_text(), number, author)
-    except (OSError, RecursionError, SystemExit, ValueError) as exc:
+        doc = review_doc.parse(path.read_text())
+        if doc.pr != number:
+            message = f"draft must name pull request {number}"
+            raise review_doc.ReviewError(message)
+        repo = pr.origin_repository()
+        if doc.repo != repo:
+            message = f"draft repo {doc.repo} differs from origin repo {repo}"
+            raise review_doc.ReviewError(message)
+        api = GhApi()
+        status, review_id = review_doc.post(
+            api,
+            doc,
+            author=author or api_author(api),
+            identity_value=pr.posting_value(os.environ),
+        )
+    except (OSError, SystemExit, ValueError) as exc:
         for problem in str(exc).splitlines():
             print(f"{path}: {problem}", file=sys.stderr)
         return 1

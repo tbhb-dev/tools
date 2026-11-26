@@ -4,8 +4,10 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    session: sha-256-64:d1314db489f96e63
-    at: "2026-11-26T15:30:07Z"
+    effort: high
+    surface: exec
+    session: sha-256-64:c860368be54f7f86
+    at: "2026-11-26T16:19:50Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -18,7 +20,7 @@ type: Reference
 
 Set `event` to `APPROVE` for GO or `REQUEST_CHANGES` for BLOCK or HOLD. The draft also accepts `COMMENT`. The required frontmatter holds `pr`, which must match N, and a 40-hex `commit_id`. For a review run, set `commit_id` to the run's pinned commit. Reviews have no H1 title. In Summary, give the reasons in one or two sentences. Fill Verification and remove the guidance comments and any unused optional sections. Findings holds blocking issues, one list item each with `path:line` and what must change. A request for changes needs findings. Suggestions holds non-blocking improvements.
 
-`tbhbdev alpha review check N` checks the draft locally, including its frontmatter, section order, word limits, prose wrapping, references, trailers, and the repository's Markdown, spelling, and prose rules. It refuses an explicit verdict in Summary or a copied final verdict line anywhere in the body. Finding classes such as `BLOCK`, `TECH-DEBT`, and `SECURITY-DEBT` can still label findings. The check prints each problem as `path:line: problem` on stderr and exits 1 on failure or 0 on success. Write plain prose, one line per paragraph, cite code as `path:line`, and leave trailers out.
+`tbhbdev alpha review check N` checks the draft locally, including its frontmatter, section order, word limits, prose wrapping, references, trailers, and the repository's Markdown, spelling, and prose rules. It refuses the old Verdict heading and a copied final verdict line anywhere in the body. Finding classes such as `BLOCK`, `TECH-DEBT`, and `SECURITY-DEBT` can still label findings. The check prints each problem as `path:line: problem` on stderr and exits 1 on failure or 0 on success. Write plain prose, one line per paragraph, cite code as `path:line`, and leave trailers out.
 
 ## Post a review document
 
@@ -26,9 +28,9 @@ Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML
 
 Leave a blank line after the header. Add `## Summary`, `## Findings`, and `## Verification` in that order. Give the reasons in Summary and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`. Follow the class with `path:line` in backticks and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
 
-`tbhbdev alpha review post N [--author LOGIN]` reads `review-N.doc.md` when that file exists. For a schema 2 document, it maps `GO` to `APPROVE` and `NO-GO` to `REQUEST_CHANGES`. The document's repository must match `origin`. It returns `exists` if the agent's GitHub account, or `LOGIN` if supplied, already has an active review with the same decision, run, head, and pull request.
+`tbhbdev alpha review post N [--author LOGIN]` reads only `review-N.doc.md`. It validates the document, checks that its repository matches `origin` and that the pull request head matches, and submits a `COMMENT` using the agent's GitHub account. It returns `exists` if that account, or `LOGIN` if supplied, already has an active review for the same run, head, and pull request. A new post requires a recognized agent session and ends with its validated `Generated-by` trailer.
 
-If the schema 2 document is absent, the command reads `review-N.md` and uses its `APPROVE` or `REQUEST_CHANGES` event. For either format, it validates the draft, checks that the pull request head matches, and submits the body and event using the agent's GitHub account. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
+The command prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2. A schema 2 draft with the old Verdict heading fails with the expected section names. Replace that heading and its decision with a Summary of the reasons, and move the decision to the `verdict` frontmatter field.
 
 ## Supersede or reply to a review
 

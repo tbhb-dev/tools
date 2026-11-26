@@ -248,49 +248,6 @@ def test_events_and_uppercase_hex_pass(event: str) -> None:
     assert structure((FRONT + body).replace("COMMENT", event).replace(HEAD, NEXT)) == []
 
 
-@pytest.mark.usefixtures("world")
-@pytest.mark.parametrize(
-    "summary",
-    [
-        "GO because the tests cover retries.",
-        "APPROVE",
-        "Approved.",
-        "**BLOCK.**",
-        "HOLD",
-        "`REQUEST_CHANGES`",
-        "Approve: the change preserves existing behavior.",
-        "The retry tests pass. GO.",
-        "The retry tests pass. **APPROVED**.",
-        "The retry tests pass. Verdict: GO",
-        "The retry tests pass. __Verdict:__ `NO-GO`",
-        "The retry tests pass. Hold: the failures are unexplained.",
-        "The retry tests pass. REQUEST_CHANGES",
-    ],
-)
-def test_check_refuses_summary_verdicts(
-    capsys: pytest.CaptureFixture[str], summary: str
-) -> None:
-    path = review.draft_path(7)
-    path.parent.mkdir()
-    path.write_text(FILLED.replace("The change passes.", summary))
-    assert run_main("check", "7", "--no-lint") == 1
-    assert capsys.readouterr().err == (
-        f"{path}:8: Summary must give reasons without stating the verdict\n"
-    )
-
-
-@pytest.mark.parametrize(
-    "summary",
-    [
-        "The blockers would hold the queue and block retries.",
-        "Go-based tooling still builds. Approval of requests follows the same rules.",
-        "The handler can go ahead after it has approved the request.",
-    ],
-)
-def test_summary_allows_words_that_do_not_declare_a_verdict(summary: str) -> None:
-    assert structure(FILLED.replace("The change passes.", summary)) == []
-
-
 @pytest.mark.parametrize(
     "body", [BODY, BODY.replace("## Verification", "## Findings\n\n## Verification")]
 )

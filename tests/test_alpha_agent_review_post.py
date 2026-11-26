@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, cast
 import httpx
 import pytest
 
+from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
-from tbhbdev.alpha.agent.model import Profile, RunKind
+from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -22,11 +23,11 @@ MINTED = "minted"
 
 
 def draft(event: str = "COMMENT", head: str = HEAD, *, findings: bool = False) -> str:
-    extra = "## Findings\n\n- BLOCK: `a.py:1` fix it.\n\n" if findings else ""
+    extra = "## Findings\n\n- `a.py:1` fix it.\n\n" if findings else ""
     return (
         f"---\npr: 7\ncommit_id: '{head}'\nevent: {event}\n---\n\n"
-        "## Summary\n\nThe tests cover the changed path.\n\n"
-        f"{extra}## Verification\n\nRead the diff.\n"
+        f"## Summary\n\nThe tests cover the changed path.\n\n{extra}"
+        "## Verification\n\nRead the diff.\n"
     )
 
 
@@ -43,8 +44,9 @@ def make(
     request = SimpleNamespace(
         repo="github.com/o/r",
         commit=HEAD,
-        harness=SimpleNamespace(value="codex"),
-        model="m1",
+        harness=Harness.CODEX,
+        model="gpt-6.2-sol",
+        effort="high",
         profile=Profile.REVIEW,
         kind=RunKind.EXEC,
     )
@@ -73,7 +75,7 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
 
 
 BASE = "https://api.github.com/repos/o/r/pulls/7"
-STAMP = f"Run r1, codex m1, judged head {HEAD}."
+STAMP = f"Run r1, judged head {HEAD}."
 
 
 class Api:
@@ -106,7 +108,7 @@ class Api:
         ("COMMENT", "b" * 40, []),
     ],
 )
-def test_posts_at_the_pinned_commit_with_identity_in_the_body(
+def test_run_host_preserves_main_review_events_and_stamps_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     event: str,
@@ -129,8 +131,71 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Summary")
     assert "VERDICT:" not in payload["body"]
-    assert payload["body"].endswith(f"\n---\n{STAMP}\n")
+    body, trailer = payload["body"].rstrip("\n").rsplit("\n\n", 1)
+    assert body.endswith(f"\n\n{STAMP}")
+    key, value = trailer.split(": ", 1)
+    assert key == agent_identity.KEY_GEN
+    assert value == (
+        "LLM effort=high;harness=codex;model=openai:gpt-6.2-sol;surface=exec"
+    )
+    assert agent_identity.check_value(value) is None
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
+
+
+@pytest.mark.parametrize(
+    ("identity", "trailer"),
+    [
+        (
+            (Harness.CLAUDE, "claude-opus-5-5", "high"),
+            (
+                "Generated-by: LLM effort=high;harness=claude-code;"
+                "model=anthropic:claude-opus-5-5;surface=start"
+            ),
+        ),
+        (
+            (Harness.AGY, "gemini-3.8-flash-low", ""),
+            (
+                "Generated-by: LLM effort=low;harness=antigravity;"
+                "model=gcp.gemini:gemini-3.8-flash;surface=start"
+            ),
+        ),
+        (
+            (Harness.CODEX, "gpt-6.2-sol", "unknown"),
+            "Generated-by: LLM harness=codex;model=openai:gpt-6.2-sol;surface=start",
+        ),
+    ],
+)
+def test_uses_normalized_host_identity_even_when_the_agent_claims_a_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: tuple[Harness, str, str],
+    trailer: str,
+) -> None:
+    text = draft() + "\nClaimed session `sha-256-64:0123456789abcdef`.\n"
+    run, prepared = make(tmp_path, text)
+    harness, model, effort = identity
+    monkeypatch.setattr(run.request, "harness", harness)
+    monkeypatch.setattr(run.request, "model", model)
+    monkeypatch.setattr(run.request, "effort", effort)
+    monkeypatch.setattr(run.request, "kind", RunKind.START)
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+    payload = api.calls[-1][2]
+    assert payload is not None
+    assert payload["body"].splitlines()[-1] == trailer
+
+
+def test_model_that_would_inject_a_session_refuses_to_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = make(tmp_path, draft())
+    monkeypatch.setattr(run.request, "model", "m1;session=sha-256-64:0123456789abcdef")
+    monkeypatch.setattr(credentials, "review_post_token", forbidden)
+    monkeypatch.setattr(httpx, "request", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert "invalid LLM trailer: model required" in run.files.path("log").read_text()
+    assert not run.files.path("review").exists()
 
 
 def test_a_run_name_posts_only_once(
@@ -241,6 +306,13 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
         (
+            draft("APPROVE")
+            .replace("## Summary", "## Verdict")
+            .replace("The tests cover the changed path.", "GO"),
+            "review-7.md",
+            "missing required section 'Summary'",
+        ),
+        (
             draft("APPROVE") + f"\nVERDICT: GO {HEAD}\n",
             "review-7.md",
             "keep the final verdict line out of the review body",
@@ -259,41 +331,6 @@ def test_a_bad_draft_posts_nothing(
     monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
     assert message in run.files.path("log").read_text()
-
-
-@pytest.mark.parametrize(
-    "summary",
-    [
-        "My verdict is GO.",
-        "APPROVE.",
-        "The tests pass. GO.",
-        "GO: The tests pass.",
-        "**GO** The tests pass.",
-        "The tests pass. Verdict: GO.",
-    ],
-)
-def test_host_refuses_a_verdict_in_summary(summary: str) -> None:
-    text = draft("APPROVE").replace("The tests cover the changed path.", summary)
-    sub = review_post.Submission("github.com/o/r", 7, text, HEAD, STAMP)
-    with pytest.raises(review_post.PostRefusedError, match="Summary must give reasons"):
-        review_post.validate(sub)
-
-
-@pytest.mark.parametrize(
-    "summary",
-    [
-        "Go is the implementation language.",
-        "The tests pass. Go is the implementation language.",
-        "Block sizes stay within existing limits.",
-        "Approved requests retain their original ordering.",
-    ],
-)
-def test_host_accepts_ordinary_prose_in_summary(summary: str) -> None:
-    text = draft("APPROVE").replace("The tests cover the changed path.", summary)
-    sub = review_post.Submission("github.com/o/r", 7, text, HEAD, STAMP)
-    fields, body = review_post.validate(sub)
-    assert fields["event"] == "APPROVE"
-    assert f"## Summary\n\n{summary}\n" in body
 
 
 def test_the_host_can_refuse_a_draft_event_allowed_by_the_schema(
