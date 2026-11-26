@@ -3,10 +3,12 @@ import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 from subprocess import CompletedProcess
+from unittest.mock import Mock
 
 import pytest
 
 from tbhbdev import content, cue_runtime
+from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import review as cli
 from tbhbdev.alpha import review_doc as review
 from tbhbdev.alpha.review_doc import Existing, Finding, Marker, ReviewDoc, Run
@@ -40,6 +42,7 @@ NO-GO
 Read the cache.
 """
 MARKER = f"<!-- tbhb-review v1 repo={REPO} pr=384 head={HEAD} run=review-build -->"
+IDENTITY = "LLM harness=codex;model=openai:gpt-6;session=sha-256-64:0123456789abcdef"
 KEY = Marker(REPO, 384, HEAD, "review-build")
 EXISTING = Existing(942, "reviews[bot]", KEY, "COMMENTED", f"{BODY}\n{MARKER}\n")
 PULL = f"repos/{REPO}/pulls/384"
@@ -340,9 +343,14 @@ def test_find_existing_refuses_non_list() -> None:
 def test_post_refuses_moved_head_and_invalid_doc() -> None:
     api = FakeApi({"head": {"sha": "f" * 40}})
     with pytest.raises(review.ReviewError, match=r"^pull request head has moved$"):
-        review.post(api, DOC, author=EXISTING.author)
+        review.post(api, DOC, author=EXISTING.author, identity_value=IDENTITY)
     with pytest.raises(review.ReviewError, match="GO forbids BLOCK findings"):
-        review.post(api, replace(DOC, verdict="GO"), author=EXISTING.author)
+        review.post(
+            api,
+            replace(DOC, verdict="GO"),
+            author=EXISTING.author,
+            identity_value=IDENTITY,
+        )
     assert api.calls == [("GET", PULL, None)]
 
 
@@ -351,6 +359,7 @@ def draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     stem = tmp_path / "review-384"
     monkeypatch.setattr(cli, "draft_path", {384: stem.with_suffix(".md")}.__getitem__)
     monkeypatch.setattr(cli.pr, "origin_repository", lambda: REPO)
+    monkeypatch.setattr(cli.pr, "posting_value", Mock(return_value=IDENTITY))
     return stem.with_suffix(".doc.md")
 
 
@@ -372,13 +381,19 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     body = review.render(doc)
+    assert agent_identity.check_value(IDENTITY) is None
+    posted_body = f"{body}\nGenerated-by: {IDENTITY}\n"
+    assert review.parse_marker(posted_body) == KEY
     calls = [
         ("GET", PULL, None),
         ("GET", PAGE + "1", None),
-        ("POST", REVIEWS, {"commit_id": HEAD, "body": body, "event": "COMMENT"}),
+        ("POST", REVIEWS, {"commit_id": HEAD, "body": posted_body, "event": "COMMENT"}),
     ]
     api = FakeApi(LIVE, [], response)
-    assert review.post(api, doc, author=EXISTING.author) == ("posted", expected)
+    assert review.post(api, doc, author=EXISTING.author, identity_value=IDENTITY) == (
+        "posted",
+        expected,
+    )
     assert api.calls == calls
     api = FakeApi(USER, LIVE, [], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
@@ -387,6 +402,34 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     assert api.calls == [("GET", "user", None), *calls]
     output = "posted\n" if expected is None else f"posted {expected}\n"
     assert capsys.readouterr() == (output, "")
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, "posting a review requires a recognized agent session"),
+        ("LLM harness=codex", "invalid LLM trailer: model required"),
+    ],
+)
+def test_post_cli_refuses_an_unavailable_or_invalid_identity(
+    draft: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+    message: str,
+) -> None:
+    draft.write_text(PREAMBLE + BODY)
+    api = FakeApi(USER, LIVE, [])
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    monkeypatch.setattr(cli.pr, "posting_value", Mock(return_value=value))
+    assert cli.main(["post", "384"], "review") == 1
+    assert capsys.readouterr() == ("", f"{draft}: {message}\n")
+    assert api.calls == [
+        ("GET", "user", None),
+        ("GET", PULL, None),
+        ("GET", PAGE + "1", None),
+    ]
 
 
 @pytest.mark.usefixtures("use_bazel_cue")
