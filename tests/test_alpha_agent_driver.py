@@ -184,7 +184,57 @@ def test_unsandboxed_build_diff_inspects_commits(
     ]
 
 
-def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
+@pytest.mark.parametrize("branch", [False, True])
+def test_clean_refuses_unpushed_build_worktree(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    branch: bool,
+) -> None:
+    monkeypatch.setattr(driver, "prepare", PREPARE)
+    assert launch(remote) == 0
+    remote.configure(session=False, branch=branch)
+    tree = remote.root / (
+        "home/Code/github.com/example-org/example-repo/.worktrees/agent-sample"
+    )
+    git_in(tree, "init", "-b", "agent/sample")
+    git_in(
+        tree,
+        "-c",
+        "user.name=Example",
+        "-c",
+        "user.email=example@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "unpublished change",
+    )
+    commit = git_in(tree, "rev-parse", "HEAD")
+    remote.file(".rc", "0")
+    remote.file(".out.final", "unread output\n")
+    metadata = driver.metadata_path("sample")
+    before = metadata.read_bytes()
+    capsys.readouterr()
+    assert command("clean") == 1
+    assert capsys.readouterr().err == (
+        "example agent: full-access run may have unpublished commits or unread "
+        "output; pass --force to clean anyway\n"
+    )
+    assert metadata.read_bytes() == before
+    assert git_in(tree, "rev-parse", "HEAD") == commit
+    assert (remote.state / "sample.out.final").read_text() == "unread output\n"
+    assert (remote.state / "sample.owner").is_file()
+    assert not (remote.state / "trash").exists()
+    assert remote.records("git") == []
+    assert command("clean", "--force") == 0
+    assert not metadata.exists()
+    trash = next((remote.state / "trash").iterdir())
+    assert (trash / "worktree").is_dir()
+    assert git_in(trash / "worktree", "rev-parse", "HEAD") == commit
+    assert (trash / "sample.out.final").read_text() == "unread output\n"
+
+
+def test_unsandboxed_force_clean_of_an_ended_run_only_moves_to_trash(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
@@ -192,7 +242,7 @@ def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
     remote.file(".rc", "0")
     before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command("clean") == 0
+    assert command("clean", "--force") == 0
     assert capsys.readouterr() == ("", "")
     assert remote.records("git") == before["git"]
     assert len(remote.records("tmux")) == len(before["tmux"]) + 2
@@ -366,6 +416,43 @@ def test_reused_name(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None
     assert remote.records("ssh") == before
 
 
+@pytest.mark.parametrize("reason", ["policy refused", "host tainted"])
+@pytest.mark.parametrize("full_access", [False, True])
+def test_refused_launch_leaves_no_metadata(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    full_access: bool,
+) -> None:
+    if full_access:
+        monkeypatch.setattr(driver, "prepare", PREPARE)
+    remote.configure(launch={"rc": "1\n", "log": reason + "\n"})
+    assert launch(remote) == 1
+    assert capsys.readouterr() == (f"sample: rc=1\n{reason}\n", "")
+    assert not driver.metadata_path("sample").exists()
+    assert not (remote.state / "sample.owner").exists()
+    trash = next((remote.state / "trash").iterdir())
+    assert (trash / "sample.log").read_text() == reason + "\n"
+
+    remote.configure(launch={"launched": ""})
+    assert launch(remote) == 0
+    assert driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(("rc", "launched"), [(0, False), (0, True), (7, True)])
+def test_completed_launch_keeps_metadata(
+    remote: Remote, rc: int, launched: bool
+) -> None:
+    records = {"rc": f"{rc}\n"}
+    if launched:
+        records["launched"] = ""
+    remote.configure(launch=records)
+    assert launch(remote) == rc
+    assert driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.owner").exists()
+
+
 @pytest.mark.parametrize("name", ["../bad", "-bad", "a b", "a" * 65, ""])
 def test_bad_name(
     remote: Remote, capsys: pytest.CaptureFixture[str], name: str
@@ -396,6 +483,15 @@ def test_review_without_ref_starts_nothing(
     assert launch(remote, "--profile", "review") == 1
     assert "a review run needs --ref" in capsys.readouterr().err
     assert remote.records("ssh") == []
+
+
+def test_review_check_refuses_empty_ref(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--profile", "review", "--ref", "") == 1
+    assert "a review run needs --ref" in capsys.readouterr().err
+    assert remote.records("ssh") == []
+    assert not driver.metadata_path("sample").exists()
 
 
 OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
@@ -743,7 +839,7 @@ def test_request_options(
 
 @pytest.mark.parametrize("rc", [0, 7])
 def test_rc_first(remote: Remote, capsys: pytest.CaptureFixture[str], rc: int) -> None:
-    remote.configure(launch={"rc": f"{rc}\n", "log": "setup stopped\n"})
+    remote.configure(launch={"rc": f"{rc}\n", "log": "setup stopped\n", "launched": ""})
     assert launch(remote) == rc
     assert capsys.readouterr() == (f"sample: rc={rc}\nsetup stopped\n", "")
     assert remote.records("tmux")[-1]["args"] == [
@@ -1166,20 +1262,30 @@ def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
     [
         ("git checkout -b feat/4-exporter", "feat/4-exporter"),
         ("Run `git checkout -B feat/4-exporter`.", "feat/4-exporter"),
+        ("git checkout feat/4-exporter", "feat/4-exporter"),
+        ("git checkout topic", "topic"),
+        ("git checkout refs/heads/topic.v2", "topic.v2"),
+        ("git checkout origin/main", "origin/main"),
         ("- Use `git switch -c 'feat/4-exporter'`.", "feat/4-exporter"),
         ("Build the exporter. Then run `git switch -C topic`.", "topic"),
         ("git switch --no-track -c topic origin/main", "topic"),
+        ("git switch feat/4-exporter", "feat/4-exporter"),
+        ("Run `git switch --quiet topic.v2`.", "topic.v2"),
         ("git push origin topic", "topic"),
         ("Run `git push origin HEAD:other`.", "other"),
         ("git push -u origin HEAD:refs/heads/agent/Sample", "agent/Sample"),
         ("git push --set-upstream origin HEAD:refs/heads/topic", "topic"),
         ("Push to branch topic.", "topic"),
         ("Push commits to `agent/other`.", "agent/other"),
+        ("Fix the exporter and push commits to `topic/other`.", "topic/other"),
+        ("Fix the exporter and push to branch `topic/other`.", "topic/other"),
         ("Push to `refs/heads/topic`.", "topic"),
-        ("Work on branch feat/4-exporter.", "feat/4-exporter"),
+        ("Work on branch `feat/4-exporter`.", "feat/4-exporter"),
+        ("Switch to the branch named `feat/4-exporter`.", "feat/4-exporter"),
         ("1. Work on the branch named `topic`.", "topic"),
-        ("Work on\nbranch feat/4-exporter", "feat/4-exporter"),
-        ("Work on branch agent/sample. Then work on branch topic.", "topic"),
+        ("Work on\nbranch `feat/4-exporter`", "feat/4-exporter"),
+        ("Work on branch `agent/sample`. Then work on branch `topic`.", "topic"),
+        ("`git checkout -b old` is forbidden. Run `git switch topic`.", "topic"),
     ],
 )
 def test_build_branch_instructions_refuse_before_any_host_work(
@@ -1206,9 +1312,13 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "Implement the retry path. Add a unit test covering the new code path.",
         "Implement the retry path. Add a unit test covering the new branch.",
         "Add a regression test asserting that `git checkout -b topic` is refused.",
+        "Improve the tests. Work on branch coverage.",
+        "- `git checkout -b topic` must be refused with a clear diagnostic.",
+        "- `git checkout refs/heads/agent/topic` is forbidden.",
+        "- `git switch agent/topic` should be rejected.",
+        "- `git push origin agent/topic` is forbidden.",
         "Write documentation explaining `git switch topic`.",
         "Document how `git switch -C topic` works.",
-        "Document how `git push origin agent/other` works.",
         "Work on branch selection logic.",
         "Diff against branch feat/4-exporter.",
         "Base branch feat/4-exporter.",
@@ -1224,8 +1334,8 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "Never create branch old. Then create no new branch.",
         "git checkout README.md",
         "git checkout src/",
+        "git checkout src/README.md",
         "git checkout '*.py'",
-        "git checkout feat/4-exporter",
         "git checkout .",
         "Restore the file with `git checkout ./README.md`.",
         "git checkout ../README.md",
@@ -1233,31 +1343,26 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "git checkout -- README.md",
         "git checkout -- -b topic",
         "git checkout HEAD -- README.md",
+        "git checkout topic README.md",
+        "git checkout HEAD",
         "git checkout origin/main -- README.md",
-        "git checkout agent/sample -- README.md",
         "git checkout --detach HEAD",
-        "git checkout refs/heads/topic",
-        "git checkout origin/main",
         "git checkout -b",
-        "git switch feat/4-exporter",
         "git switch --detach HEAD",
+        "git switch -q --detach topic",
         "Create branch feat/4-exporter.",
         "git branch --show-current",
         "git branch feat/4-exporter",
         "git worktree add .worktrees/exporter -b feat/4-exporter",
-        "Switch to the branch named `feat/4-exporter`.",
         "Check out branch 'feat/4-exporter'.",
         'Commit on a branch "feat/4-exporter".',
-        "Work on branch agent/sample.",
-        "Work on branch `refs/heads/agent/sample`.",
+        "Work on branch `agent/sample`.",
+        "git checkout -B agent/sample",
         "git switch -C agent/sample",
         "git switch-backup feat/4-exporter",
         "git push origin",
         "git push origin HEAD",
         "git push origin topic:refs/tags/version",
-        "git push origin agent/sample",
-        "git push --set-upstream origin HEAD:refs/heads/agent/sample",
-        "Push commits to `agent/sample`.",
     ],
 )
 def test_build_allows_restores_and_briefs_without_explicit_branch_changes(
@@ -1362,6 +1467,7 @@ def test_prompt_warns_about_unfetched_refs_and_launches(
     [
         ("See (refs/pull/5/head); reuse refs/pull/5/head.", (), "refs/pull/5/head"),
         ("Use refs/heads/agent/topic.", (), "refs/heads/agent/topic"),
+        ("git checkout agent/sample -- README.md", (), "refs/heads/agent/sample"),
         (
             "Use `agent/Topic`.",
             ("--fetch-ref", "refs/heads/agent/topic"),
@@ -1397,6 +1503,9 @@ def test_prompt_refuses_unfetched_exact_refs_before_ssh(
         ("Update the existing PR\nbranch.", "<branch>"),
         ("Push commits to the PR branch.", "<branch>"),
         ("Update `agent/topic`.", "agent/topic"),
+        ("Fix the exporter and push to the existing agent/topic.", "agent/topic"),
+        ("Document how `git push origin agent/topic` works.", "agent/topic"),
+        ("Publish when ready with `git push origin HEAD:refs/heads/topic`.", "topic"),
     ],
 )
 def test_build_prompt_that_updates_a_pr_branch_needs_start_ref(

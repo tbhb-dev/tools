@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:2a5807cd5db21177
-    at: "2026-11-26T15:18:13Z"
+    session: sha-256-64:8dd0118c9e55c445
+    at: "2026-11-26T15:39:21Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -18,7 +18,7 @@ type: Reference
 
 Run-host runs git in a run clone only during `clone_run` and `create`, before launch. After the harness starts, run-host never runs git in that clone. The controller's `diff` command can read committed work there through the run account's SSH connection. An operator who runs `git add -A` or `git stash` in a run clone can run a nested repository's clean filter. The port never runs those commands in a run clone.
 
-Run-host checks out a new build branch from a commit and leaves upstream tracking unset before launch. The legacy sandbox probes keep `.git/config` read-only. In those probes, use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
+Run-host checks out `agent/NAME` for a build and leaves upstream tracking unset. Each run clone gets a `reference-transaction` hook pinned to the run branch and starting commit. In prepared transactions, it refuses updates to other local branches and requires each new run-branch tip to descend from the start. Git's files backend can rename a branch without reporting a prepared transaction. Deleting the run branch and updating tags, remote-tracking refs, the stash, and detached `HEAD` are allowed. The pre-push hook accepts only `refs/heads/agent/NAME` as a branch destination. Run-host's own Git commands run with hooks disabled. The legacy sandbox probes keep `.git/config` read-only. In those probes, use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
 
 Every `agent exec` run has the account’s full access. It can read the account’s 1Password Connect token and every secret the account can read, and write anything the account can write. Codex, Claude and agy use this behavior for both build and review profiles. The agent account supplies the boundary. A child can leave the process group and keep running after the run ends.
 Runs skip sandbox policy checks, executable trust checks and write-root audits. They still refuse mise shims.
@@ -45,13 +45,14 @@ Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON s
 
 The driver assigns `agent/<run-name>` to each build. Before contacting the host, `agent exec --profile build` checks the brief for instructions that target another branch. If the driver finds one, it prints the allowed branch and exits with status 1. With `--start-ref`, the host starts from the selected commit and publishes the result to the selected remote branch. The agent still works on `agent/<run-name>`.
 
-The check looks for these forms at the start of a paragraph, sentence, or list item.
+The check looks for these forms at the start of a paragraph, sentence, or list item. Commands can follow a verb such as `Run`.
 
-- `git checkout -b NAME`, `git checkout -B NAME`, `git switch -c NAME`, and `git switch -C NAME`.
+- `git switch NAME`, `git switch -c NAME`, and `git switch -C NAME`.
+- `git checkout -b NAME` and `git checkout -B NAME`. The check also recognizes `git checkout NAME` with a single target when the name has no period or starts with `refs/heads/`.
 - `git push origin NAME` and `git push origin HEAD:refs/heads/NAME`, with or without options such as `-u` before `origin`.
-- `work on branch NAME`, `push to branch NAME`, and `push commits to agent/NAME`.
+- An instruction such as “work on branch `NAME`” with the branch name in a code span.
 
-Commands may start with a verb such as `Run`. The check accepts quotes around branch names and ignores the optional `refs/heads/` prefix. Branch names are case-sensitive. Briefs can describe commands in prose or ask to restore files with `git checkout -- FILE`.
+The check also looks for named pushes in prose, such as “push commits to `topic/other`.” Branch names are case-sensitive. The check skips quoted examples such as “`git checkout -b topic` must be refused.” Use `git checkout -- FILE` to restore files.
 
 Each run gets a private `TMPDIR`. Run-host sets `PYTEST_DEBUG_TEMPROOT` to the same directory for pytest's default base directory. At exit, run-host removes the run's temporary tree without following symlinks. If removal fails, the run keeps its exit status.
 
@@ -91,7 +92,7 @@ Don't run git inside a run clone: it is agent-written. Use `tbhbdev alpha agent 
 
 `log NAME` shows up to ten pushed commits by default. `log -n 5 NAME` changes that count. When `agent/<name>` exists on origin, `diff NAME` shows changes from the default branch's merge base to that pushed branch. These reads fetch the origin's default branch and `agent/<name>` into the mirror, then inspect those refs. If the branch is absent on origin, `diff NAME` reads the run's own clone through the recorded run account's SSH connection and prints `git format-patch --stdout refs/remotes/origin/<default>..HEAD`. It resolves the default branch name on origin and uses that branch’s ref saved in the run clone at startup. This includes local commits and omits uncommitted changes; no commits produces empty output. The fallback never lets Git read the run's own configuration. It reads `HEAD`, the loose ref files, and `packed-refs` as plain text and checks each value is a 40-digit hash. It then runs `format-patch` in a new empty bare repository in a temporary directory that borrows only the run's object directory, so settings such as `include.path`, `format.from`, `format.signatureFile`, and `commondir` in the run clone have no effect. The fallback refuses a symlink in the clone path, in the git files it reads, and anywhere under `objects` and `refs`, and it refuses an unreadable `objects` or `refs` directory, an `objects/info/alternates` file, and a multi-pack index. The new repository also skips the user's global Git configuration. It passes `--no-signature`, `--no-attach`, `--no-add-header`, and `--no-notes`. The symlink scan and the read aren't atomic, so a run that's still writing can swap a path between them. Both paths disable external diff, text conversion, and color, cap output at 65536 bytes, and filter terminal controls. Neither `wait` nor `status` needs the mirror. The mirror never prunes, so disk use grows with history until a pruning follow-up.
 
-Cleanup refuses an open session. Every new run requires `clean --force`, which moves the run clone and per-run files into dated trash without reading agent-written git state. Cleanup refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists. `log` prints a full-access run's final output (or its stream) from the host, the same as `wait` does. `diff` does the same for full-access review runs; full-access build runs inspect commits.
+Cleanup refuses an open session. Every full-access run requires `clean --force`, even after it ends, because cleanup cannot verify that all commits reached origin or that the output was read. Read the output and verify pushed commits before forcing cleanup. The command moves the run clone and per-run files into dated trash without reading agent-written git state. Cleanup refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists. `log` prints a full-access run's final output (or its stream) from the host, the same as `wait` does. `diff` does the same for full-access review runs; full-access build runs inspect commits.
 
 Ref resolution runs outside the clone against the SSH URL from the repository argument. Remote Git uses an empty environment and explicit overrides for hooks, file monitoring, SSH, credentials, prompts, external protocols, paging, submodules, and automatic maintenance. It disables lazy fetching. Remote scripts use the C locale. Run file reads refuse symlinks, bound byte counts, check status fields, replace invalid UTF-8, and remove terminal control characters. Polls wait at least half a second between connections.
 

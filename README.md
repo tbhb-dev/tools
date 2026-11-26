@@ -86,7 +86,7 @@ The GitHub credential (`gh`) is optional. Without it, a build run requests its G
 - [Prose check](docs/reference/prose-check.md)
 - [Agent hosts](docs/reference/agent-hosts.md)
 - [Plugins](docs/reference/plugins.md)
-- [Alpha commands](docs/reference/alpha/commands.md)
+- [Alpha commands](docs/reference/alpha/commands/index.md)
 
 ## Layout
 

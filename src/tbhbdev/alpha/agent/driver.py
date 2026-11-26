@@ -500,6 +500,10 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
                 f"\n{reading.text}",
                 end="",
             )
+            if reading.rc and not reading.launched:
+                # A refusal before the harness starts must release both claims
+                # so the name can be used again. Keep the refusal log in trash.
+                clean(settings, run, force=True)
             return reading.rc or 0
         if action == "launched":
             print(
@@ -703,7 +707,13 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
         (run.name, run.owner),
     )
     rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
-    if not force and not run.request.unsandboxed:
+    if not force and run.request.unsandboxed:
+        message = (
+            "full-access run may have unpublished commits or unread output; "
+            "pass --force to clean anyway"
+        )
+        raise Invalid(message)
+    if not force:
         branch = transport.shell(
             settings,
             run.host,

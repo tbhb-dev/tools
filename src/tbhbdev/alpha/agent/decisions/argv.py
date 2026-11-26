@@ -14,6 +14,7 @@ import shutil
 import socket
 import sys
 from pathlib import Path
+from typing import cast
 
 from tbhbdev.alpha.agent.decisions import policy as policy_module
 from tbhbdev.alpha.agent.model import (
@@ -194,6 +195,12 @@ def _codex(
         "-c",
         f"web_search={_toml(detail.web_search.value)}",
     ]
+    # A spawn that names a model keeps it. One that names none gets this model
+    # and not the run's.
+    argv += [
+        "-c",
+        f"agents.default_subagent_model={_toml(detail.subagent_model)}",
+    ]
     if detail.network_proxy is not None:
         domains = ",".join(
             f'{_toml(d)}="allow"' for d in detail.network_proxy["domains"]
@@ -247,7 +254,10 @@ def _claude(
     )
     options = detail.settings
     if headless:
-        options = options | {"disableAllHooks": False, "hooks": stop_hooks("claude")}
+        # Keep the policy's own hooks (the agent-model guard) beside Stop.
+        own = cast("dict[str, object]", options.get("hooks", {}))
+        hooks = {**own, **stop_hooks("claude")}
+        options = options | {"disableAllHooks": False, "hooks": hooks}
     settings = json.dumps(options, separators=(",", ":"), sort_keys=True)
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]

@@ -10,6 +10,7 @@ There are no default lists here: write roots, denied paths and `PATH` come from
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -194,7 +195,14 @@ def _codex(
     proxy = network_proxy(settings)
     if full:
         return CodexPolicy(
-            CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search, None
+            CodexMode.FULL_ACCESS,
+            (),
+            (),
+            deny,
+            APPROVAL_POLICY,
+            search,
+            None,
+            codex.subagent_model,
         )
     return CodexPolicy(
         CodexMode.PROFILE,
@@ -204,6 +212,7 @@ def _codex(
         APPROVAL_POLICY,
         search,
         proxy,
+        codex.subagent_model,
     )
 
 
@@ -217,6 +226,28 @@ def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
     return (paths.worktree, *protected_git(paths))
 
 
+# Forks always run on the parent's model, so they stay off.
+_CLAUDE_SUBAGENT_ENV = {"CLAUDE_CODE_FORK_SUBAGENT": "0"}
+
+
+def _guard_hooks(command: str) -> dict[str, object]:
+    """The settings' only hook: refuse an Agent launch that names no model.
+
+    A launch may name any model. Hooks stay on for this, so the user's own
+    hooks load too. `onFailure: "block"` makes a guard that cannot run (a
+    missing binary, a timeout, a crash) refuse the launch instead of
+    letting it through.
+    """
+    handler = {"type": "command", "command": command, "onFailure": "block"}
+    return {"PreToolUse": [{"matcher": "Agent", "hooks": [handler]}]}
+
+
+def _guard_command(host: Host, home: str) -> str:
+    """Run `tbhbdev alpha guard-agent-model` from the host's configured binary."""
+    program = host.tbhbdev or resolve(home, ".local/bin/tbhbdev")
+    return f"{shlex.quote(program)} alpha guard-agent-model"
+
+
 def _claude(  # noqa: PLR0913 -- one value per policy input
     profile: Profile,
     paths: RunPaths,
@@ -224,17 +255,19 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     env: dict[str, str],
     domains: tuple[str, ...],
     *,
+    guard: str,
     full: bool,
 ) -> ClaudePolicy:
     if full:
         # Claude user settings override the process environment.
         return ClaudePolicy(
             {
-                "disableAllHooks": True,
                 "env": {
                     "GH_CONFIG_DIR": env["GH_CONFIG_DIR"],
                     "DOCKER_CONFIG": env["DOCKER_CONFIG"],
+                    **_CLAUDE_SUBAGENT_ENV,
                 },
+                "hooks": _guard_hooks(guard),
                 "sandbox": {"enabled": False},
             }
         )
@@ -274,24 +307,25 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     if paths.signing_socket is not None:
         network["allowUnixSockets"] = [paths.signing_socket]
     sandbox["network"] = network
+    run_env = {
+        k: env[k]
+        for k in (
+            "TMPDIR",
+            "PATH",
+            "TMPPREFIX",
+            "GH_CONFIG_DIR",
+            "DOCKER_CONFIG",
+            "GIT_NO_LAZY_FETCH",
+            "PYTEST_DEBUG_TEMPROOT",
+            "PYTEST_XDIST_AUTO_NUM_WORKERS",
+            "SSH_AUTH_SOCK",
+        )
+        if k in env
+    } | _CLAUDE_SUBAGENT_ENV
     return ClaudePolicy(
         {
-            "disableAllHooks": True,
-            "env": {
-                k: env[k]
-                for k in (
-                    "TMPDIR",
-                    "PATH",
-                    "TMPPREFIX",
-                    "GH_CONFIG_DIR",
-                    "DOCKER_CONFIG",
-                    "GIT_NO_LAZY_FETCH",
-                    "PYTEST_DEBUG_TEMPROOT",
-                    "PYTEST_XDIST_AUTO_NUM_WORKERS",
-                    "SSH_AUTH_SOCK",
-                )
-                if k in env
-            },
+            "env": run_env,
+            "hooks": _guard_hooks(guard),
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
                 "deny": [
@@ -438,7 +472,15 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
         if harness is Harness.CODEX:
             detail = _codex(settings, profile, (), (), full=True)
         elif harness is Harness.CLAUDE:
-            detail = _claude(profile, paths, ((), (), ()), env, (), full=True)
+            detail = _claude(
+                profile,
+                paths,
+                ((), (), ()),
+                env,
+                (),
+                guard=_guard_command(host, paths.home),
+                full=True,
+            )
         else:
             detail = AgyPolicy(())
         return Policy(harness, profile, env, (), detail, tools_path)
@@ -485,6 +527,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             (writes, deny, protected),
             env | {"PATH": tools_path},
             settings.sandbox.network_domains,
+            guard=_guard_command(host, paths.home),
             full=False,
         )
     else:

@@ -26,30 +26,50 @@ _REF_USE = re.compile(
     r"|(?i:git fetch) \S+ )[\[(`\"']?"
     rf"({brief.SHORT_AGENT_REF})"
 )
+_PUSH_TO = r"push (?:\w+ )?to"
 _UPDATE = re.compile(
-    r"\b(?:(?i:(?P<update>update)|push (?:\w+ )?to) "
+    rf"\b(?:(?i:update|{_PUSH_TO}) "
     r"(?:(?i:a|the|this|its|current|existing|branch) )*"
     r"|(?i:git push) [^\s`]+ (?:[^\s`:]+:)?)"
-    rf"(?:[`\"']?(?P<ref>refs/heads/{brief.BRANCH_REF}{brief.REF_END}|{brief.SHORT_AGENT_REF})"
+    rf"(?:[`\"']?(refs/heads/{brief.BRANCH_REF}{brief.REF_END}|{brief.SHORT_AGENT_REF})"
     r"|(?i:(?:PR|pull request)(?: #\d+)? (?:head|branch))\b)"
+)
+_REFUSED_COMMAND_EXAMPLE = re.compile(
+    r"(?P<quote>[`\"'])(?i:git (?:checkout|switch|push)) "
+    r"(?:(?!(?P=quote))[^\n])+(?P=quote)"
+    r"(?=\s+(?i:(?:(?:must|should|will) be|is) (?:refused|forbidden|rejected))\b)"
 )
 _INSTRUCTION_START = r"(?:^|(?<=[.!?;]) +)(?:[-*+] |\d+[.)] )?(?:(?i:then) )?"
 _BRANCH_NAME = rf"(?:refs/heads/)?(?!refs/|[-./]){brief.BRANCH_REF}"
+_BRANCH_PHRASE = r"(?:a |the )?branch (?:named )?"
 _GIT_OPTIONS = r"(?: --?\w[\w-]*)*"
-# Bare checkout targets can be paths. A bare HEAD push leaves the branch unnamed.
+# A plain checkout can also restore files. Require a single branch name.
+_CHECKOUT_BRANCH = (
+    rf"(?=(?:refs/heads/{brief.BRANCH_REF}|(?!HEAD{brief.REF_END})[\w/-]*[\w-])"
+    r"(?=[`]|[\"']?(?: *[;&|]|[.,!?](?: |$)|$)))"
+)
 _BRANCH_COMMAND = re.compile(
     rf"{_INSTRUCTION_START}(?:(?i:run|use|execute)(?: |: *))?[`\"']?(?i:git) "
-    rf"(?:(?:(?i:checkout){_GIT_OPTIONS} -[bB]|(?i:switch){_GIT_OPTIONS} -[cC]) [`\"']?"
+    rf"(?:(?i:checkout){_GIT_OPTIONS} -[bB] [`\"']?"
+    rf"|(?i:checkout)(?: -q| --quiet)? [`\"']?{_CHECKOUT_BRANCH}"
+    rf"|(?i:switch)(?!{_GIT_OPTIONS} (?:-d|--detach)\b)"
+    rf"{_GIT_OPTIONS}(?: -[cC])?(?: --)? [`\"']?"
     rf"|(?i:push){_GIT_OPTIONS} (?!-)[^\s`\"']+ [`\"']?\+?"
     rf"(?:[^\s`\"':]+:)?(?!HEAD{brief.REF_END}))"
     rf"({_BRANCH_NAME})(?!:){brief.REF_END}",
     re.MULTILINE,
 )
 _BRANCH_REQUEST = re.compile(
-    rf"{_INSTRUCTION_START}(?:(?i:work on|push (?:\w+ )?to) "
-    r"(?i:(?:a |the )?branch (?:named )?)[`\"']?"
-    r"|(?i:push (?:\w+ )?to) [`\"']?(?=refs/heads/|agent/))"
-    rf"({_BRANCH_NAME})(?=[`\"']|[.,;!?](?: |$)|$)",
+    rf"{_INSTRUCTION_START}"
+    rf"(?i:(?:create |work on |commit on |check out |switch to |on )"
+    rf"{_BRANCH_PHRASE})`({_BRANCH_NAME})`",
+    re.MULTILINE,
+)
+_PUSH_REQUEST = re.compile(
+    rf"(?:\b(?i:{_PUSH_TO} (?:{_BRANCH_PHRASE})?)(?=`{_BRANCH_NAME}`)"
+    rf"|{_INSTRUCTION_START}(?i:{_PUSH_TO}) "
+    rf"(?:(?i:{_BRANCH_PHRASE})|(?=[`\"']?(?:refs/heads/|agent/))))"
+    rf"[`\"']?({_BRANCH_NAME})(?=[`\"']|[.,;!?](?: |$)|$)",
     re.MULTILINE,
 )
 
@@ -86,7 +106,7 @@ def _unfetched_explicit_refs(
 
 
 def _build_branch_problems(prose: str, allowed: str) -> list[str]:
-    for pattern in (_BRANCH_COMMAND, _BRANCH_REQUEST):
+    for pattern in (_BRANCH_COMMAND, _BRANCH_REQUEST, _PUSH_REQUEST):
         for match in _instructions(pattern, prose):
             branch = match[1].removeprefix("refs/heads/")
             if branch != allowed:
@@ -107,23 +127,17 @@ def prompt_launch_problems(
     run: str,
 ) -> list[str]:
     """Check explicit ref uses and branch update instructions in a launch brief."""
+    if profile is Profile.BUILD:
+        prompt = _REFUSED_COMMAND_EXAMPLE.sub("the example", prompt)
     # Fold line wraps within a paragraph without changing ref case.
     prose = "\n".join(
         " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
     )
     if profile is Profile.BUILD:
-        branch = f"agent/{run}"
-        branch_problems = _build_branch_problems(prose, branch)
+        branch_problems = _build_branch_problems(prose, f"agent/{run}")
         if branch_problems:
             return branch_problems
-        # The driver creates this branch; it doesn't need fetching.
-        fetch_refs = [*fetch_refs, f"refs/heads/{branch}"]
-    # Build pushes to named branches already went through the instruction check.
-    updates = [
-        match["ref"]
-        for match in _instructions(_UPDATE, prose)
-        if profile is Profile.REVIEW or match["update"] or match["ref"] is None
-    ]
+    updates = [match[1] for match in _instructions(_UPDATE, prose)]
     named_refs = [match[1] for match in _instructions(_REF_USE, prose)] + updates
     problems = [
         f"the brief names {ref}. Add `--fetch-ref {ref}`"
@@ -177,7 +191,7 @@ def check(
             "For a build run use --fetch-ref REF --start-ref REF"
         )
         raise Invalid(message)
-    if ref is None and run.profile is Profile.REVIEW:
+    if not ref and run.profile is Profile.REVIEW:
         message = "a review run needs --ref with the full commit hash to review"
         raise Invalid(message)
     if run.harness is Harness.CLAUDE:

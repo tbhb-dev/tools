@@ -88,9 +88,10 @@ contains one.
 in order, but only when its GitHub author is the account this ``gh`` runs as. It
 stops at the first failure and doesn't read a draft.
 
-``rerun N`` reruns only the failed jobs of the latest run for pull request N's
+``rerun N`` reruns the failed jobs of every failed run for pull request N's
 current head commit with ``gh run rerun --failed``. It reports an error when
-that run hasn't failed or no run exists. It doesn't read a draft.
+no failed run exists, and attempts every rerun even if one fails, returning
+the first failure's exit code. It doesn't read a draft.
 
 ``rerun N --stuck`` cancels a ``pull_request`` run of pull request N's current
 head when one of its jobs has been in progress for over an hour, then reruns
@@ -101,14 +102,15 @@ such run is in progress or no job is that old.
 request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
 
-``checks N`` prints pull request N's head SHA, then one line per check
+``checks N`` reads checks from pull request N's head commit, then prints the
+head SHA on the first line and beside each check
 with its name and conclusion. A check run that hasn't COMPLETED reads its
 status, never its conclusion; unfinished checks
 print ``PENDING``. A commit status reads only its state, and only ``SUCCESS``
 is green. Any
 conclusion other than ``SUCCESS``, ``NEUTRAL``, ``SKIPPED`` or ``PENDING``
 exits 1, and so does a check with no name or an unknown value. Pending checks
-alone exit 3, and only all-green checks exit 0.
+alone or a head with no checks exit 3, and only all-green checks exit 0.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -163,6 +165,7 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # A merge appends " (#N)" and the header must fit 72; 64 leaves room
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
+SCC = "scc"
 BAZEL = "bazelisk"
 BAZEL_ENV = ".bazel_env"
 # Module constants, not literals in the functions: macOS file systems ignore
@@ -1842,29 +1845,34 @@ def rerun_stuck(number: int) -> int:
 
 
 def rerun(number: int) -> int:
-    """Rerun the failed jobs of PR N's latest current-head run.
+    """Rerun the failed jobs of every failed run for PR N's current head.
 
     Raises:
         SystemExit: gh can't read the pull request or its runs.
     """
-    runs = gh_json(
+    head = head_of(number)
+    pages = gh_json(
         [
-            "run",
-            "list",
-            "--commit",
-            head_of(number),
-            "--limit",
-            "1",
-            "--json",
-            "databaseId,conclusion",
+            "api",
+            f"repos/{{owner}}/{{repo}}/actions/runs?head_sha={head}&per_page=100",
+            "--paginate",
+            "--slurp",
         ]
     )
-    if not runs or runs[0]["conclusion"] != "failure":
+    failed = [
+        item
+        for page in pages
+        for item in cast("list[dict[str, object]]", page["workflow_runs"])
+        if item["conclusion"] == "failure"
+    ]
+    if not failed:
         print(f"no failed run for the current head of PR {number}", file=sys.stderr)
         return 1
-    return invoke_gh([GH, "run", "rerun", str(runs[0]["databaseId"]), "--failed"], "")[
-        0
-    ]
+    code = 0
+    for item in failed:
+        result = invoke_gh([GH, "run", "rerun", str(item["id"]), "--failed"], "")[0]
+        code = code or result
+    return code
 
 
 GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
@@ -1924,43 +1932,96 @@ def check_outcome(job: object) -> tuple[str, str, str]:
     return name, label, "green" if green else "failed"
 
 
+# Query the immutable commit, rather than the PR's potentially stale rollup.
+# gh follows pageInfo with --paginate; --slurp combines all context pages.
+HEAD_CHECKS_CALL = (
+    "api",
+    "graphql",
+    "--paginate",
+    "--slurp",
+    "--field",
+    "owner={owner}",
+    "--field",
+    "name={repo}",
+)
+HEAD_CHECKS_QUERY = """
+query($owner: String!, $name: String!, $head: GitObjectID!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $head) {
+      ... on Commit {
+        statusCheckRollup {
+          contexts(first: 100, after: $endCursor) {
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion }
+              ... on StatusContext { context state }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def check_nodes(page: dict[str, object]) -> list[object]:
+    """Read a page of commit checks; a null rollup means none have started.
+
+    Raises:
+        SystemExit: the response doesn't contain a list of checks.
+    """
+    node: object = page
+    for key in (
+        "data",
+        "repository",
+        "object",
+        "statusCheckRollup",
+        "contexts",
+        "nodes",
+    ):
+        if not isinstance(node, dict):
+            message = "cannot read checks: malformed GraphQL response"
+            raise SystemExit(message)
+        node = cast("dict[str, object]", node).get(key)  # pragma: no mutate
+        if key == "statusCheckRollup" and node is None:
+            return []
+    if not isinstance(node, list):
+        message = "cannot read checks: contexts nodes aren't a list"
+        raise SystemExit(message)
+    return cast("list[object]", node)  # pragma: no mutate
+
+
 def checks(number: int) -> int:
     """Print a PR's head SHA and checks; exit 0 only when all are green.
 
-    Exit 1 for a failed or unknown check or no checks, and 3 when the rest are
+    Exit 1 for a failed or unknown check, and 3 when checks are absent or
     still unfinished.
 
     Raises:
-        SystemExit: gh can't read the pull request, or a check has no name.
+        SystemExit: gh can't read the pull request or checks, or a check has no name.
     """
-    argv = [
-        find_tool(GH),
-        "pr",
-        "view",
-        str(number),
-        "--json",
-        "headRefOid,statusCheckRollup",
-    ]
-    done = run(argv)
-    data = gh_data(done)
-    if not isinstance(data, dict):
-        why = " ".join((done.stderr or done.stdout).split())
-        message = f"cannot read checks of PR {number}: {why}"
-        raise SystemExit(message)
-    data = cast("dict[str, object]", data)  # pragma: no mutate
-    print(data["headRefOid"])
-    rollup: object = data["statusCheckRollup"] or []
-    if not isinstance(rollup, list):
-        message = f"the checks of PR {number} aren't a list: {rollup!r}"
-        raise SystemExit(message)
-    jobs = cast("list[object]", rollup)  # pragma: no mutate
+    head = head_of(number)
+    print(head)
+    pages = gh_json(
+        [
+            *HEAD_CHECKS_CALL,
+            "--raw-field",
+            f"head={head}",
+            "--raw-field",
+            f"query={HEAD_CHECKS_QUERY}",
+        ]
+    )
+    jobs = [job for page in pages for job in check_nodes(page)]
     if not jobs:
-        print(f"no checks on PR {number}", file=sys.stderr)
-        return 1
-    failed = pending = False
+        print(f"no checks on PR {number} at {head}; pending", file=sys.stderr)
+        return PENDING_CODE
+    # None has the same truth value here; its initialization mutant is equivalent.
+    failed = pending = False  # pragma: no mutate
     for job in jobs:
         name, label, kind = check_outcome(job)
-        print(f"{name}: {label}")
+        print(f"{head} {name}: {label}")
         pending = pending or kind == "pending"
         failed = failed or kind == "failed"
     if failed:
@@ -2044,7 +2105,11 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
     PR. A dry run reports an excess as a warning and still previews.
     """
     branch = base_of(checked.meta)
-    dry_run = getattr(args, "dry_run", False)
+    dry_run = getattr(
+        args,
+        "dry_run",
+        False,  # pragma: no mutate -- None is also false.
+    )
     base = f"refs/remotes/origin/{branch}"
     verify = ("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
     if args.command == "create" and not target_is_origin():
@@ -2071,7 +2136,10 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
         return
     try:
         counts = size_gate.size_counts(
-            base, "HEAD", bazelisk=_TOOL_PATHS.get().get((BAZEL, False), BAZEL)
+            base,
+            "HEAD",
+            scc=_TOOL_PATHS.get().get((SCC, False), SCC),
+            git=_TOOL_PATHS.get().get((GIT, False), GIT),
         )
     except size_gate.SizeCountError as exc:
         print(f"size count unavailable: {exc}", file=sys.stderr)
@@ -2102,9 +2170,9 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if args.command == "create":
         names += (GITLEAKS, GH)
     paths = find_tools(names, unwrapped=unwrapped)
-    # Not required: without bazelisk the size count only warns.
+    # Not required: without scc the size count only warns.
     with contextlib.suppress(SystemExit):
-        paths.update(find_tools((BAZEL,)))
+        paths.update(find_tools((SCC,)))
     token = _TOOL_PATHS.set({(name, name in unwrapped): p for name, p in paths.items()})
     try:
         return _run_command(args, env)

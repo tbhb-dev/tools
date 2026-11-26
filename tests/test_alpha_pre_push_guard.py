@@ -17,6 +17,7 @@ from fake_tool import pythonpath
 from tbhbdev import alpha
 from tbhbdev.alpha import gh_shim, install
 from tbhbdev.alpha import pre_push_guard as pg
+from tbhbdev.alpha.agent import worktree
 
 ZERO = "0" * 40
 PRIVATE = "fixturerepo"
@@ -185,6 +186,33 @@ def push(
         text=True,
         check=False,
     )
+
+
+def test_run_hook_confines_pushed_branches(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def resolve(name: str) -> str:
+        assert name == "prek"
+        return "/unused/prek"
+
+    env = install_hook(repo, monkeypatch)
+    env.pop(pg.RUN_NAME_ENV, None)
+    monkeypatch.setattr(worktree.host_tools, "resolve", resolve)
+    worktree.install_hooks(repo, "example", git(repo, "rev-parse", "HEAD"))
+    for destination, allowed in (
+        ("refs/heads/agent/other", False),
+        ("refs/heads/agent/example", True),
+        ("refs/tags/example", True),
+    ):
+        result = push(repo, env, "origin", f"HEAD:{destination}")
+        if allowed:
+            assert result.returncode == 0, result.stderr
+        else:
+            assert result.returncode == 1
+            assert (
+                f"{destination}: this run may only push refs/heads/agent/example"
+                in result.stderr
+            )
 
 
 def test_real_pushes_through_the_installed_hook(

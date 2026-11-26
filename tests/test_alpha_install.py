@@ -275,6 +275,10 @@ def test_claude_hooks() -> None:
                     {"type": "command", "command": marked("guard-gh-config-dir")}
                 ],
             },
+            {
+                "matcher": "Agent",
+                "hooks": [{"type": "command", "command": marked("guard-agent-model")}],
+            },
         ],
         "PostToolUse": [
             {"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash", "hooks": [record]},

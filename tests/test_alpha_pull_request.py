@@ -210,6 +210,7 @@ def world_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made = World(root, tools_dir)
     made.fake("cog")
     made.fake("bazelisk")
+    made.fake("scc")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
     made.fake("rumdl")
@@ -1727,7 +1728,10 @@ def test_a_draft_without_a_base_takes_the_default_branch(
     write_draft(world, BASE)
     run_main("check")
     counted.assert_called_once_with(
-        "refs/remotes/origin/trunk", "HEAD", bazelisk=str(world.bin / "bazelisk")
+        "refs/remotes/origin/trunk",
+        "HEAD",
+        scc=str(world.bin / "scc"),
+        git=str(world.root.parent / "git_dir" / "git"),
     )
 
 
@@ -1866,7 +1870,7 @@ def test_pr_reports_all_missing_tools_before_reading_the_draft(
 
 
 @pytest.mark.parametrize("verb", ["check", "create"])
-def test_pr_runs_without_bazelisk_and_warns_about_the_size_count(
+def test_pr_runs_without_scc_and_warns_about_the_size_count(
     world: World,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1874,7 +1878,7 @@ def test_pr_runs_without_bazelisk_and_warns_about_the_size_count(
 ) -> None:
     # The world fixture stubs the counter; this test needs the real one.
     monkeypatch.setattr(size_gate, "size_counts", REAL_SIZE_COUNTS)
-    (world.bin / "bazelisk").unlink()
+    (world.bin / "scc").unlink()
     write_draft(world)
     args = ("create", "--dry-run") if verb == "create" else ("check",)
     assert run_main(*args) == 0
@@ -2454,7 +2458,7 @@ def test_run_uses_the_given_directory(tmp_path: Path) -> None:
 def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     write_draft(world)
     (world.bin / "bazelisk").unlink()
-    worktree_tool(world, "bazelisk", "raise SystemExit('missing target')")
+    world.fake("bash", rc=1, stderr="missing counter")
     bare = world.root.parent / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
     world.git("push", "-q", str(bare), "HEAD:refs/heads/main")
@@ -2477,7 +2481,7 @@ def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     )
     assert (done.returncode, done.stderr) == (
         0,
-        "size count unavailable: missing target\n",
+        "size count unavailable: missing counter\n",
     )
 
 
@@ -3459,7 +3463,9 @@ def test_rerun_retries_failed_jobs_of_the_current_head(
                 "stdout": json.dumps({"headRefOid": head}),
                 "stderr": "",
             },
-            "run list": gh_list([{"databaseId": 123, "conclusion": "failure"}]),
+            "api repos/{owner}/{repo}/actions/runs?": gh_list(
+                [{"workflow_runs": [{"id": 123, "conclusion": "failure"}]}]
+            ),
         },
     )
     assert run_main("rerun", "45") == rc
@@ -3469,14 +3475,10 @@ def test_rerun_retries_failed_jobs_of_the_current_head(
     assert [call["argv"] for call in calls] == [
         ["pr", "view", "45", "--json", "headRefOid"],
         [
-            "run",
-            "list",
-            "--commit",
-            head,
-            "--limit",
-            "1",
-            "--json",
-            "databaseId,conclusion",
+            "api",
+            f"repos/{{owner}}/{{repo}}/actions/runs?head_sha={head}&per_page=100",
+            "--paginate",
+            "--slurp",
         ],
         ["run", "rerun", "123", "--failed"],
     ]
@@ -3487,11 +3489,11 @@ def test_rerun_retries_failed_jobs_of_the_current_head(
     "runs",
     [
         [],
-        [{"databaseId": 123, "conclusion": "success"}],
-        [{"databaseId": 123, "conclusion": ""}],
+        [{"id": 123, "conclusion": "success"}],
+        [{"id": 123, "conclusion": ""}],
         [
-            {"databaseId": 123, "conclusion": "success"},
-            {"databaseId": 122, "conclusion": "failure"},
+            {"id": 123, "conclusion": "success"},
+            {"id": 122, "conclusion": "cancelled"},
         ],
     ],
 )
@@ -3506,12 +3508,47 @@ def test_rerun_reports_no_failed_run(
                 "stdout": json.dumps({"headRefOid": "a" * 40}),
                 "stderr": "",
             },
-            "run list": gh_list(runs),
+            "api repos/{owner}/{repo}/actions/runs?": gh_list(
+                [{"workflow_runs": runs}]
+            ),
         },
     )
     assert run_main("rerun", "45") == 1
     assert capsys.readouterr().err == "no failed run for the current head of PR 45\n"
     assert len(world.calls("gh")) == 2
+
+
+@pytest.mark.parametrize(("first_rc", "last_rc"), [(0, 0), (3, 0), (0, 4), (3, 4)])
+def test_rerun_retries_failed_run_when_newest_passed(
+    world: World, first_rc: int, last_rc: int
+) -> None:
+    runs: list[dict[str, object]] = [
+        {"id": 125, "conclusion": "success"},
+        {"id": 124, "conclusion": "failure"},
+        {"id": 123, "conclusion": ""},
+        {"id": 122, "conclusion": "failure"},
+    ]
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": "a" * 40}),
+                "stderr": "",
+            },
+            "api repos/{owner}/{repo}/actions/runs?": gh_list(
+                [{"workflow_runs": runs[:2]}, {"workflow_runs": runs[2:]}]
+            ),
+            "run rerun 124": {"rc": first_rc, "stdout": "", "stderr": ""},
+            "run rerun 122": {"rc": last_rc, "stdout": "", "stderr": ""},
+            "run list": gh_list([{"databaseId": 125, "conclusion": "success"}]),
+        },
+    )
+    assert run_main("rerun", "45") == (first_rc or last_rc)
+    assert [call["argv"] for call in world.calls("gh")][2:] == [
+        ["run", "rerun", "124", "--failed"],
+        ["run", "rerun", "122", "--failed"],
+    ]
 
 
 NOW = dt.datetime(2026, 11, 23, 18, 0, tzinfo=dt.UTC)
@@ -3807,6 +3844,16 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
     assert info.value.code == 2
 
 
+def check_page(jobs: object) -> dict[str, object]:
+    return {
+        "data": {
+            "repository": {
+                "object": {"statusCheckRollup": {"contexts": {"nodes": jobs}}}
+            }
+        }
+    }
+
+
 @pytest.mark.parametrize(
     ("jobs", "expected", "code"),
     [
@@ -4041,31 +4088,153 @@ def test_checks_prints_the_head_and_each_job(
 ) -> None:
     sha = "a1b2c3d4" * 5
     data = {"headRefOid": sha, "statusCheckRollup": jobs}
-    world.fake("gh", stdout=json.dumps(data))
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
     assert run_main("checks", "45") == code
     captured = capsys.readouterr()
-    assert (captured.out, captured.err) == (f"{sha}\n{expected}", "")
-    (call,) = world.calls("gh")
+    lines = "".join(f"{sha} {line}\n" for line in expected.splitlines())
+    assert (captured.out, captured.err) == (f"{sha}\n{lines}", "")
+    call, api = world.calls("gh")
     assert call["argv"] == [
         "pr",
         "view",
         "45",
         "--json",
-        "headRefOid,statusCheckRollup",
+        "headRefOid",
     ]
     assert call["stdin"] == ""
     assert call["cwd"] == str(world.root)
+    assert api["argv"] == [
+        *pr.HEAD_CHECKS_CALL,
+        "--raw-field",
+        f"head={sha}",
+        "--raw-field",
+        f"query={pr.HEAD_CHECKS_QUERY}",
+    ]
+    assert "object(oid: $head)" in pr.HEAD_CHECKS_QUERY
+    assert "contexts(first: 100, after: $endCursor)" in pr.HEAD_CHECKS_QUERY
+    assert "pageInfo { hasNextPage endCursor }" in pr.HEAD_CHECKS_QUERY
+    assert "... on CheckRun { name status conclusion }" in pr.HEAD_CHECKS_QUERY
+    assert "... on StatusContext { context state }" in pr.HEAD_CHECKS_QUERY
 
 
-@pytest.mark.parametrize("jobs", [[], None])
-def test_checks_fails_without_any_check(
-    world: World, capsys: pytest.CaptureFixture[str], jobs: list[object] | None
+def test_checks_waits_without_any_check(
+    world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     sha = "a1b2c3d4" * 5
-    world.fake("gh", stdout=json.dumps({"headRefOid": sha, "statusCheckRollup": jobs}))
-    assert run_main("checks", "45") == 1
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": sha}),
+                "stderr": "",
+            },
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page([])]),
+                "stderr": "",
+            },
+        },
+    )
+    assert run_main("checks", "45") == 3
     captured = capsys.readouterr()
-    assert (captured.out, captured.err) == (f"{sha}\n", "no checks on PR 45\n")
+    assert (captured.out, captured.err) == (
+        f"{sha}\n",
+        f"no checks on PR 45 at {sha}; pending\n",
+    )
+
+
+def test_head_with_no_conclusion_run_exits_pending(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head = "a" * 40
+    stale = {
+        "name": "tests",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+    }
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    {"headRefOid": head, "statusCheckRollup": [stale]}
+                ),
+                "stderr": "",
+            },
+            "api graphql": {"rc": 0, "stdout": "[]", "stderr": ""},
+        },
+    )
+    assert run_main("checks", "45") == 3
+    captured = capsys.readouterr()
+    assert captured.out == f"{head}\n"
+    assert "no checks" in captured.err
+    assert f"head={head}" in cast("list[str]", world.calls("gh")[1]["argv"])
+
+
+@pytest.mark.parametrize(
+    "page",
+    [{}, {"data": []}, {"data": {"repository": {"object": None}}}],
+)
+def test_check_nodes_refuses_malformed_graphql(page: dict[str, object]) -> None:
+    with pytest.raises(
+        SystemExit, match=r"^cannot read checks: malformed GraphQL response$"
+    ):
+        pr.check_nodes(page)
+
+
+def test_check_nodes_accepts_a_null_rollup() -> None:
+    page: dict[str, object] = {
+        "data": {"repository": {"object": {"statusCheckRollup": None}}}
+    }
+    assert pr.check_nodes(page) == []
+
+
+def test_checks_includes_failures_from_later_pages(world: World) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": '{"headRefOid": "abc"}', "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    [
+                        check_page(
+                            [
+                                {
+                                    "name": "first",
+                                    "status": "COMPLETED",
+                                    "conclusion": "SUCCESS",
+                                }
+                            ]
+                        ),
+                        check_page(
+                            [
+                                {
+                                    "name": "last",
+                                    "status": "COMPLETED",
+                                    "conclusion": "FAILURE",
+                                }
+                            ]
+                        ),
+                    ]
+                ),
+                "stderr": "",
+            },
+        },
+    )
+    assert run_main("checks", "45") == 1
 
 
 @pytest.mark.parametrize(
@@ -4085,7 +4254,17 @@ def test_checks_names_a_check_without_a_name(
     world: World, job: dict[str, object]
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
-    world.fake("gh", stdout=json.dumps(data))
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
     with pytest.raises(
         SystemExit, match=r"^a check of the rollup has no usable name or context"
     ):
@@ -4097,8 +4276,20 @@ def test_checks_refuses_a_rollup_that_is_not_a_list(
     world: World, rollup: object
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": rollup}
-    world.fake("gh", stdout=json.dumps(data))
-    with pytest.raises(SystemExit, match=r"^the checks of PR 45 aren't a list"):
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
+    with pytest.raises(
+        SystemExit, match=r"^cannot read checks: contexts nodes aren't a list$"
+    ):
         run_main("checks", "45")
 
 
@@ -4107,7 +4298,17 @@ def test_checks_refuses_an_entry_that_is_not_an_object(
     world: World, job: object
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
-    world.fake("gh", stdout=json.dumps(data))
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
     with pytest.raises(SystemExit, match=r"^a check of the rollup isn't an object"):
         run_main("checks", "45")
 
@@ -4133,7 +4334,7 @@ def test_checks_stops_when_the_pr_cannot_be_read(
 ) -> None:
     world.fake("gh", cases={"pr view": answer})
     with pytest.raises(
-        SystemExit, match=f"^cannot read checks of PR 45: {re.escape(why)}$"
+        SystemExit, match=f"^cannot read the head of PR 45: {re.escape(why)}$"
     ):
         run_main("checks", "45")
     captured = capsys.readouterr()

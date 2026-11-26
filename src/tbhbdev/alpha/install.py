@@ -255,6 +255,7 @@ exit $status
 
 PRE_PUSH_SHIM = """#!{python}
 {mark}
+import os
 import pathlib
 import re
 import shutil
@@ -262,11 +263,12 @@ import subprocess
 import sys
 
 payload = sys.stdin.buffer.read()
+run_env = {run_env!r}
 status = 0
 if shutil.which("tbhbdev"):
     status = subprocess.run(
         ["tbhbdev", "alpha", "pre-push-guard", *sys.argv[1:]],
-        input=payload, check=False,
+        input=payload, env=os.environ | run_env, check=False,
     ).returncode
 else:
     target = sys.argv[2]
@@ -278,7 +280,7 @@ else:
             capture_output=True, text=True, check=False,
         )
         target = remote.stdout if remote.returncode == 0 else ""
-    if re.fullmatch({pattern!r}, target, re.IGNORECASE | re.ASCII):
+    if run_env or re.fullmatch({pattern!r}, target, re.IGNORECASE | re.ASCII):
         print("pre-push: tbhbdev is not on PATH; push refused", file=sys.stderr)
         status = 1
 next_hook = pathlib.Path(__file__).with_name("pre-push.prek")
@@ -350,6 +352,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", handler("guard-scripts")),
             group("Bash|Write|Edit", guard),
             group("Bash", handler("guard-gh-config-dir")),
+            group("Agent", handler("guard-agent-model")),
         ],
         "PostToolUse": [
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", record),
@@ -1401,6 +1404,7 @@ def install_pre_push_hook(hooks: Path) -> None:
             python=Path(sys.base_prefix, "bin", "python3"),
             mark=SHIM_MARK,
             pattern=TBHB_DEV_ORIGIN.pattern,
+            run_env={},
         )
     )
     hook.chmod(0o755)

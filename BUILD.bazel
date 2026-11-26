@@ -213,6 +213,7 @@ pytest_test(
         "@cue_test_tool//:cue",
         "@tbhb_rules_cog//:cog",
         "@tbhb_rules_gitleaks//:gitleaks",
+        "@tbhb_rules_scc//:scc",
     ],
 )
 
@@ -428,6 +429,7 @@ bazel_env(
         "ruff": ":ruff",
         "rumdl": "@tbhb_rules_rumdl//:rumdl",
         "ryl": "@tbhb_rules_ryl//:ryl",
+        "scc": "@tbhb_rules_scc//:scc",
         "shellcheck": "@tbhb_rules_shellcheck//:shellcheck",
         "shfmt": "@tbhb_rules_shfmt//:shfmt",
         "tombi": "@tbhb_rules_tombi//:tombi",
