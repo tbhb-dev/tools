@@ -17,6 +17,7 @@ from tbhbdev.alpha import (
     agent,
     brief,
     gh_shim,
+    guard_agent_model,
     guard_gh_config_dir,
     guard_gh_poll,
     guard_gh_pr,
@@ -40,6 +41,7 @@ __all__ = [
     "agent",
     "brief",
     "gh_shim",
+    "guard_agent_model",
     "guard_gh_config_dir",
     "guard_gh_poll",
     "guard_gh_pr",
@@ -76,6 +78,7 @@ commands:
   guard-gh-config-dir PreToolUse hook: require nonempty GH_CONFIG_DIR for gh
   guard-scripts PreToolUse hook: keep scripts for the operator in
                ~/.local/libexec/tbhb
+  guard-agent-model PreToolUse hook: require a model on Agent launches
   gh-shim      budget gh calls made by agent sessions and their scripts
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
@@ -144,6 +147,10 @@ def gh_config_dir_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_config_dir.main()
 
 
+def agent_model_command(_argv: list[str], _prog: str) -> int:
+    return guard_agent_model.main()
+
+
 def scripts_command(_argv: list[str], _prog: str) -> int:
     return guard_scripts.main()
 
@@ -209,6 +216,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "guard-gh-config-dir": gh_config_dir_command,
     "guard-ssh-agent": ssh_agent_command,
     "guard-scripts": scripts_command,
+    "guard-agent-model": agent_model_command,
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
     "pr": pr,
