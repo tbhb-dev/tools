@@ -416,6 +416,43 @@ def test_reused_name(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None
     assert remote.records("ssh") == before
 
 
+@pytest.mark.parametrize("reason", ["policy refused", "host tainted"])
+@pytest.mark.parametrize("full_access", [False, True])
+def test_refused_launch_leaves_no_metadata(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    full_access: bool,
+) -> None:
+    if full_access:
+        monkeypatch.setattr(driver, "prepare", PREPARE)
+    remote.configure(launch={"rc": "1\n", "log": reason + "\n"})
+    assert launch(remote) == 1
+    assert capsys.readouterr() == (f"sample: rc=1\n{reason}\n", "")
+    assert not driver.metadata_path("sample").exists()
+    assert not (remote.state / "sample.owner").exists()
+    trash = next((remote.state / "trash").iterdir())
+    assert (trash / "sample.log").read_text() == reason + "\n"
+
+    remote.configure(launch={"launched": ""})
+    assert launch(remote) == 0
+    assert driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(("rc", "launched"), [(0, False), (0, True), (7, True)])
+def test_completed_launch_keeps_metadata(
+    remote: Remote, rc: int, launched: bool
+) -> None:
+    records = {"rc": f"{rc}\n"}
+    if launched:
+        records["launched"] = ""
+    remote.configure(launch=records)
+    assert launch(remote) == rc
+    assert driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.owner").exists()
+
+
 @pytest.mark.parametrize("name", ["../bad", "-bad", "a b", "a" * 65, ""])
 def test_bad_name(
     remote: Remote, capsys: pytest.CaptureFixture[str], name: str
@@ -802,7 +839,7 @@ def test_request_options(
 
 @pytest.mark.parametrize("rc", [0, 7])
 def test_rc_first(remote: Remote, capsys: pytest.CaptureFixture[str], rc: int) -> None:
-    remote.configure(launch={"rc": f"{rc}\n", "log": "setup stopped\n"})
+    remote.configure(launch={"rc": f"{rc}\n", "log": "setup stopped\n", "launched": ""})
     assert launch(remote) == rc
     assert capsys.readouterr() == (f"sample: rc={rc}\nsetup stopped\n", "")
     assert remote.records("tmux")[-1]["args"] == [
