@@ -31,6 +31,7 @@ PROVIDERS = {
     "gemini": "google",
 }
 HEAD_SHA = re.compile(r"[0-9a-f]{40}")
+LEGACY_FOOTER = re.compile(r"Run \S+, (\S+) \S+, judged head ([0-9a-f]{40})\.")
 
 
 class Review(TypedDict):
@@ -62,12 +63,18 @@ def provider_of(harness: str) -> str | None:
     return PROVIDERS.get(harness.lower().partition(":")[0])
 
 
-def review_attributes(body: str) -> dict[str, str]:
-    """Read attribution from the review's final trailer."""
-    trailers = identity.llm_trailers(body.rstrip().rpartition("\n")[2])
+def review_provider(body: str, head: str) -> str | None:
+    """Read the approving provider from either host-written footer."""
+    footer = body.rstrip().rpartition("\n")[2]
+    trailers = identity.llm_trailers(footer)
     if trailers and trailers[0][0] == identity.KEY_GEN:
-        return dict(identity.ATTR_PAIR.findall(trailers[0][1]))
-    return {}
+        return provider_of(
+            dict(identity.ATTR_PAIR.findall(trailers[0][1])).get("harness", "")
+        )
+    legacy = LEGACY_FOOTER.fullmatch(footer)
+    if legacy and legacy[2] == head:
+        return provider_of(legacy[1])
+    return None
 
 
 def author_providers(messages: Sequence[str]) -> tuple[set[str], list[str]]:
@@ -99,7 +106,7 @@ def approvals_at_head(app: str, pull: Pull) -> tuple[int, set[str], list[str]]:
         if review["state"] == "CHANGES_REQUESTED":
             reasons.append(f"review {review['id']} requests changes at the head")
         elif review["state"] == "APPROVED":
-            provider = provider_of(review_attributes(review["body"]).get("harness", ""))
+            provider = review_provider(review["body"], pull.head)
             if provider:
                 approvals += 1
                 providers.add(provider)

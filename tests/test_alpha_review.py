@@ -232,31 +232,29 @@ def test_events_and_uppercase_hex_pass(event: str) -> None:
 
 @pytest.mark.usefixtures("world")
 @pytest.mark.parametrize(
-    "summary",
+    ("body", "message"),
     [
-        "GO because the tests cover retries.",
-        "APPROVE",
-        "Approved.",
-        "**BLOCK.**",
-        "HOLD",
-        "`REQUEST_CHANGES`",
-        "Approve: the change preserves existing behavior.",
-        "The retry tests pass. GO.",
-        "The retry tests pass. **APPROVED**.",
-        "The retry tests pass. Verdict: GO",
-        "The retry tests pass. __Verdict:__ `NO-GO`",
-        "The retry tests pass. Hold: the failures are unexplained.",
-        "The retry tests pass. REQUEST_CHANGES",
+        (
+            BODY.replace("## Summary", "## Verdict"),
+            "Rename Verdict to Summary and give the reasons for the review",
+        ),
+        (
+            BODY.replace("- Read the diff", "Read the diff"),
+            (
+                "Write Verification as one to six unnumbered bullets "
+                "of at most 20 words each"
+            ),
+        ),
     ],
 )
-def test_check_refuses_summary_verdicts(
-    capsys: pytest.CaptureFixture[str], summary: str
+def test_check_gives_one_message_for_a_legacy_draft(
+    capsys: pytest.CaptureFixture[str], body: str, message: str
 ) -> None:
     path = review.draft_path(7)
     path.parent.mkdir()
-    path.write_text(FILLED.replace("The change passes.", summary))
+    path.write_text(FRONT + body)
     assert run_main("check", "7", "--no-lint") == 1
-    assert f"{path}:6:" in capsys.readouterr().err
+    assert capsys.readouterr() == ("", f"{path}:6: {message}\n")
 
 
 @pytest.mark.parametrize(

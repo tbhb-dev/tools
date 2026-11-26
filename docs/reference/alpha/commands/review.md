@@ -2,11 +2,10 @@
 description: Review drafts, threads, policy checks and the run host's review posting.
 generated:
   - role: generated
-    harness: codex:0.166.0
+    harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     surface: exec
-    session: sha-256-64:b4a0e82d6519a059
-    at: "2026-11-26T15:26:50Z"
+    at: "2026-11-26T16:32:40Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -16,7 +15,7 @@ type: Reference
 # Review commands
 
 `review draft N` and `review check N` create and check a review draft.
-The Summary gives the reasons for the review in one or two sentences. The review event records the verdict.
+The Summary gives the reasons for the review in one paragraph of at most 250 visible characters. The review event records the verdict.
 `review post N [--author LOGIN]` submits an approval or a request for changes.
 `review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
 See [Review drafts](../review-drafts.md) for the formats and checks.
@@ -48,5 +47,4 @@ Before an approval it reads the pull request head once and refuses if the head d
 P0 and P1 findings require `REQUEST_CHANGES`.
 For headless runs without an output schema, the host reads the final verdict line separately.
 Any 2xx response counts as posted.
-The review ends with the host's `Generated-by: LLM` trailer.
-The review gate reads the commit from GitHub's `commit_id` and the provider from the trailer.
+The review ends with the host's `Generated-by: LLM` trailer, including the run's `variant` when supplied. The review gate reads the commit from GitHub's `commit_id` and the provider from the trailer or the legacy run footer. For legacy reviews, the gate also checks that the footer refers to the same commit.

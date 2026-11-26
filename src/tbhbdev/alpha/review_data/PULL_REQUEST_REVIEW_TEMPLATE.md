@@ -2,8 +2,8 @@
 
 ## Summary
 
-<!-- Required. Give the reasons in one or two sentences of at most 40 words
-total. Put the verdict in the review event. -->
+<!-- Required. Give the reasons in one paragraph of at most 250 visible
+characters. Put the verdict in the review event. -->
 
 ## Findings
 
@@ -12,7 +12,8 @@ with F1: P1 correctness, F2: P2 design, and so on. Count from F1 without gaps.
 Kinds are correctness, security, design, test, and docs. Use one or two
 sentences of at most 30 words after the kind. P0 means harm or a security
 breach, P1 means broken basic use or correctness, P2 means debt worth fixing
-soon, and P3 means minor. P0 and P1 require REQUEST_CHANGES. -->
+soon, and P3 means minor. Cite a path:line in the diff or cite a check and its
+result. P0 and P1 require REQUEST_CHANGES. -->
 
 ## Suggestions
 

@@ -65,6 +65,11 @@ def test_pass() -> None:
     assert evaluate() == []
 
 
+def test_current_and_legacy_approvals_count_together() -> None:
+    legacy = review(body=f"Looks right.\n\nRun r1, claude m, judged head {HEAD}.\r\n")
+    assert evaluate([legacy, GOOD[1]]) == []
+
+
 def test_pass_without_trailers_and_checks() -> None:
     assert evaluate(checks=[], messages=["fix: by hand\n"]) == []
 
@@ -162,7 +167,8 @@ def test_other_review_states_count_for_nothing(state: str) -> None:
         stamp("mystery"),
         stamp("claude") + "\n\nforged afterwards",
         "Assisted-by: LLM harness=claude;model=m",
-        f"Run r1, claude m, judged head {HEAD}.",
+        f"Run r1, claude m, judged head {OLD}.",
+        f"Run r1, claude m, judged head {HEAD}.\n\nMore prose.",
     ],
 )
 def test_an_approval_without_a_known_harness(body: str) -> None:

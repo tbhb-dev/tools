@@ -214,6 +214,9 @@ def test_post_and_cli_send_the_verdict_as_event(  # noqa: PLR0913, PLR0917
     api = FakeApi(USER, LIVE, [], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     draft.write_text(PREAMBLE.replace("NO-GO", doc.verdict) + doc.body)
+    assert cli.main(["check", "384"], "review") == 0
+    assert capsys.readouterr() == ("", "")
+    assert api.calls == []
     assert cli.main(["post", "384"], "review") == 0
     assert api.calls == [("GET", "user", None), *calls]
     output = "posted\n" if expected is None else f"posted {expected}\n"
@@ -283,7 +286,8 @@ def test_post_cli_exists_and_refusals(
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     args = ["post", "384", "--author", EXISTING.author]
     assert cli.main(args, "review") == 1
-    assert capsys.readouterr().err.startswith(f"{draft}: ")
+    standard = draft.with_name("review-384.md")
+    assert capsys.readouterr().err.startswith(f"{standard}: ")
     draft.write_text(PREAMBLE + BODY)
     assert cli.main(args, "review") == 0
     assert capsys.readouterr() == ("exists 942\n", "")
@@ -295,9 +299,43 @@ def test_post_cli_exists_and_refusals(
     assert capsys.readouterr() == ("", f"{draft}: draft must name pull request 384\n")
     draft.write_text((PREAMBLE + BODY).replace("NO-GO", "GO"))
     assert cli.main(args, "review") == 1
-    err = capsys.readouterr().err
-    assert err.startswith(f"{draft}: _err: P0 and P1 findings require REQUEST_CHANGES:")
-    assert all(line.startswith(f"{draft}: ") for line in err.splitlines())
+    assert capsys.readouterr() == (
+        "",
+        f"{draft}: Findings: P0 and P1 findings require REQUEST_CHANGES\n",
+    )
+
+
+@pytest.mark.usefixtures("review_cue")
+def test_check_and_post_prefer_the_same_document(
+    draft: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    standard = draft.with_name("review-384.md")
+    standard.write_text(
+        f"---\npr: 384\ncommit_id: {HEAD}\nevent: APPROVE\n---\n{GO.body}"
+    )
+    api = FakeApi()
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    check = ["check", "384", "--no-lint"]
+    assert cli.main(check, "review") == 0
+    draft.write_text(PREAMBLE.replace("pr: 384", "pr: 383") + BODY)
+    assert cli.main(check, "review") == 1
+    assert capsys.readouterr() == (
+        "",
+        f"{draft}:1: draft must name pull request 384\n",
+    )
+    draft.write_text(PREAMBLE + BODY.replace("- Read the cache.", "Read the cache."))
+    message = (
+        "Write Verification as one to six unnumbered bullets of at most 20 words each"
+    )
+    assert cli.main(["check", "384"], "review") == 1
+    first = PREAMBLE.count("\n") + 1
+    assert capsys.readouterr() == ("", f"{draft}:{first}: {message}\n")
+    assert cli.main(["post", "384", "--author", EXISTING.author], "review") == 1
+    assert capsys.readouterr() == ("", f"{draft}: {message}\n")
+    draft.write_text(PREAMBLE + BODY)
+    assert cli.main(check, "review") == 0
+    assert capsys.readouterr() == ("", "")
+    assert api.calls == []
 
 
 @pytest.mark.usefixtures("review_cue")

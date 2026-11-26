@@ -22,7 +22,6 @@ def body_with(heading: str, text: str) -> str:
 @pytest.mark.parametrize(
     ("heading", "item", "words", "count"),
     [
-        ("Summary", "", 40, 1),
         ("Findings", "- F{}: P3 docs ", 30, 8),
         ("Suggestions", "- S{}: ", 25, 5),
         ("Verification", "- ", 20, 6),
@@ -37,8 +36,67 @@ def test_review_limits(heading: str, item: str, words: int, count: int) -> None:
 
     assert not content.check_review(body(words, count))
     assert content.check_review(body(words + 1, 1))
-    if heading != "Summary":
-        assert content.check_review(body(1, count + 1))
+    assert content.check_review(body(1, count + 1))
+
+
+def test_summary_length_counts_characters() -> None:
+    assert not content.check_review(body_with("Summary", "é" * 250))
+    assert content.check_review(body_with("Summary", "é" * 251)) == [
+        "Write one Summary paragraph of at most 250 visible characters"
+    ]
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "The handler returns the `APPROVE` enum.",
+        "The handler checks each result, e.g. a stale value. Retries preserve it.",
+        "Decision: approve.",
+        'Retries are safe. The handler reports "Saved." The cache keeps the result.',
+        "The handler recognizes `VERDICT: GO`.",
+        "VERDICT: GO.",
+    ],
+)
+def test_summary_accepts_prose_without_interpreting_it(summary: str) -> None:
+    assert not content.check_review(body_with("Summary", summary))
+
+
+@pytest.mark.parametrize("verdict", ["GO", "BLOCK"])
+def test_review_refuses_standalone_verdict_line(verdict: str) -> None:
+    assert content.check_review(
+        body_with("Summary", f"The cache is warm.\nVERDICT: {verdict}\nRead the code.")
+    ) == ["Remove the standalone verdict line from Summary"]
+    assert content.check_review(
+        (SUMMARY + VERIFICATION + f"\nVERDICT: {verdict}\n").replace("\n", "\r\n")
+    ) == ["Remove the standalone verdict line from Verification"]
+
+
+@pytest.mark.parametrize("evidence", ["src/app.py:4", "`src/app.py:4`"])
+def test_review_accepts_path_line_evidence(evidence: str) -> None:
+    body = body_with("Findings", f"- F1: P1 correctness Fix the cache at {evidence}.")
+    assert not content.check_review(body, event="REQUEST_CHANGES")
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (VERIFICATION, "Add a Summary section"),
+        (SUMMARY, "Add a Verification section"),
+        (
+            VERIFICATION + SUMMARY,
+            "Use Summary, optional Findings and Suggestions, then Verification",
+        ),
+    ],
+)
+def test_review_reports_section_order(body: str, message: str) -> None:
+    assert content.check_review(body) == [message]
+
+
+@pytest.mark.parametrize("metadata", [{}, {"verdict": "GO", "repo": "invalid"}])
+def test_review_reports_invalid_schema_two_metadata(metadata: content.Json) -> None:
+    assert content.check_review(SUMMARY + VERIFICATION, metadata=metadata) == [
+        "Correct the schema 2 review frontmatter"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -46,9 +104,8 @@ def test_review_limits(heading: str, item: str, words: int, count: int) -> None:
     [
         ("Findings", "- F1: P0 security Fix it.\n- F3: P2 test Write a test."),
         ("Findings", "- F1: P1 bug Fix it."),
-        ("Findings", "- F1: P3 docs Fix it at `src/app.py:4`."),
         ("Findings", "- F1: P2 test **CI** is green."),
-        ("Findings", "- F1: P2 test One. Two. Three."),
+        ("Findings", "- F1: P2 test CI is green!"),
         ("Suggestions", "- S1: Add an example.\n- S3: Improve the label."),
         ("Suggestions", "- V1: Add an example."),
         ("Verification", "1. Read the cache."),

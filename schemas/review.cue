@@ -13,21 +13,13 @@ import (
 #ReviewEvent:   "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
 #FindingPrefix: #"^F([1-8]): P([0-3]) (correctness|security|design|test|docs)\s+([\s\S]+)$"#
 #Word:          #"[\p{L}\p{N}_]+"#
-#SentenceEnd:   #"([.!?]+) "#
-#VerdictWord:   #"(NO-GO|GO|APPROVED?|BLOCK|HOLD|REQUEST_CHANGES)"#
-#Verdict:       #"\b\#(#VerdictWord)\b|(?i)\bverdict(?:\s*:\s*|\s+is\s+)\#(#VerdictWord)\b|(?i)(^|[.!?]\s+)\#(#VerdictWord)(\s*:|[.!?](\s|$)|\s+because\b|\s*$)"#
-#ReviewStamp:   #"(?i)(\bjudged head\b|\b(commit|head)[ :=]+[0-9a-f]{7,40}\b|\bverdict\s*:\s*\#(#VerdictWord)\b|\b\#(#ReviewSHA)\b|(?m:^(Run|Provider|Model|Variant|Host|Head|Tier):))"#
+#VerdictLine:   #"(?m)^VERDICT: (GO|BLOCK)\r?$"#
+#ReviewStamp:   #"(?i)(\bjudged head\b|\b(commit|head)[ :=]+[0-9a-f]{7,40}\b|\b\#(#ReviewSHA)\b|(?m:^(Run|Provider|Model|Variant|Host|Head|Tier):))"#
 
 #ReviewProse: {
 	_text:  string
 	_words: len(regexp.FindAll(#Word, _text, -1)) & >=1
 	...
-}
-
-#ReviewSentences: #ReviewProse & {
-	_text:      string
-	_sentences: strings.Split(regexp.ReplaceAll(#SentenceEnd, _text, "$1\n"), "\n")
-	_sentences: ([_] | [_, _]) & [...(=~#Word & =~#"[.!?]$"#)]
 }
 
 #ReviewItem: #ListItem & {
@@ -36,18 +28,11 @@ import (
 	checked?: error("Use a bullet without a task checkbox")
 }
 
-#ReviewFinding: #ReviewItem & #ReviewSentences & {
-	visible: !~#"[^\s:]+:[1-9][0-9]*\b"#
+#ReviewFinding: #ReviewItem & #ReviewProse & {
+	visible: string
 	_parts:  regexp.FindSubmatch(#FindingPrefix, visible)
-	_text:   strings.Join(strings.Fields(_parts[4]), " ")
-	_sentences: [...string]
-	_words: <=30
-	for sentence in _sentences {
-		let prose = strings.TrimSpace(strings.TrimRight(sentence, ".!?"))
-		if prose =~ #CIRestatement {
-			_err: error("A finding may not restate a CI gate")
-		}
-	}
+	_text:   strings.TrimRight(strings.Join(strings.Fields(_parts[4]), " "), ".!?") & !~#CIRestatement
+	_words:  <=30
 }
 
 #ReviewSuggestion: #ReviewItem & #ReviewProse & {
@@ -78,18 +63,11 @@ import (
 		...
 	}
 	blocks: close({
+		["summary" | "findings" | "suggestions" | "verification"]: {source: !~#VerdictLine}
 		summary: {
 			kind:    "section"
 			heading: "Summary"
-			content: [#Paragraph & #ReviewSentences & {
-				source:  !~#ReviewStamp
-				visible: !~#ReviewStamp
-				if visible =~ #Verdict {
-					_err: error("Summary must give reasons without stating the verdict")
-				}
-				_text:  strings.Join(strings.Fields(visible), " ")
-				_words: <=40
-			}]
+			content: [#Paragraph & {metrics: visible: characters: >=1 & <=250}]
 		}
 		findings?: {
 			kind:    "section"

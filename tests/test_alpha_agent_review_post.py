@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from tbhbdev.alpha import review_doc
+from tbhbdev.alpha import identity, review_doc
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
 from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
@@ -262,7 +262,7 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         (
             draft("APPROVE") + f"\nVERDICT: GO {HEAD}\n",
             "review-7.md",
-            "blocks.verification",
+            "Write Verification as one to six unnumbered bullets",
         ),
     ],
 )
@@ -282,21 +282,13 @@ def test_a_bad_draft_posts_nothing(
     assert message in run.files.path("log").read_text()
 
 
-@pytest.mark.parametrize(
-    "summary",
-    [
-        "My verdict is GO.",
-        "APPROVE.",
-        "The tests pass. GO.",
-        "GO: The tests pass.",
-        "**GO** The tests pass.",
-        "The tests pass. Verdict: GO.",
-    ],
-)
-def test_host_refuses_a_verdict_in_summary(summary: str) -> None:
-    text = draft("APPROVE").replace("The tests cover the changed path.", summary)
+def test_host_refuses_a_standalone_verdict_line() -> None:
+    text = draft("APPROVE").replace("The tests cover the changed path.", "VERDICT: GO")
     sub = review_post.Submission("github.com/o/r", 7, text, HEAD, STAMP)
-    with pytest.raises(review_post.PostRefusedError, match="Summary must give reasons"):
+    with pytest.raises(
+        review_post.PostRefusedError,
+        match="Remove the standalone verdict line from Summary",
+    ):
         review_post.validate(sub)
 
 
@@ -307,6 +299,7 @@ def test_host_refuses_a_verdict_in_summary(summary: str) -> None:
         "The tests pass. Go is the implementation language.",
         "Block sizes stay within existing limits.",
         "Approved requests retain their original ordering.",
+        "The handler returns the `APPROVE` enum.",
     ],
 )
 def test_host_accepts_ordinary_prose_in_summary(summary: str) -> None:
@@ -449,6 +442,11 @@ def test_review_attribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     trailer = review_post.stamp(run)
     assert "harness=antigravity;" in trailer
     assert trailer.endswith(";variant=a")
+    assert identity.check_message(trailer) == []
+    monkeypatch.setattr(run.request, "variant", "a;b")
+    with pytest.raises(review_post.PostRefusedError, match="invalid LLM trailer"):
+        review_post.stamp(run)
+    monkeypatch.setattr(run.request, "variant", None)
     monkeypatch.setattr(run.request, "model", "a;b")
     with pytest.raises(review_post.PostRefusedError, match="invalid LLM trailer"):
         review_post.stamp(run)

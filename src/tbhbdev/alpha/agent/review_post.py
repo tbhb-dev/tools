@@ -167,13 +167,13 @@ def stamp(run: Run) -> str:
             "harness": identity.SLUGS[key],
             "launch": identity.sha256_64(run.files.name),
             "model": request.model,
+            "variant": request.variant or "",
         }
     )
     if why := identity.check_value(value):
         message = f"invalid LLM trailer: {why}"
         raise PostRefusedError(message)
-    variant = f";variant={request.variant}" if request.variant else ""
-    return f"{identity.KEY_GEN}: {value}{variant}"
+    return f"{identity.KEY_GEN}: {value}"
 
 
 def check_verdict(run: Run) -> None:

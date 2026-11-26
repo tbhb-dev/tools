@@ -49,6 +49,13 @@ def draft_path(number: int) -> Path:
     return Path(directory).resolve() / "tbhb-alpha" / f"review-{number}.md"
 
 
+def select_draft(number: int) -> tuple[Path, bool]:
+    """Return the selected path and whether it uses schema 2 frontmatter."""
+    standard = draft_path(number)
+    document = standard.with_suffix(".doc.md")
+    return (document, True) if document.exists() else (standard, False)
+
+
 def fetch_head(number: int) -> str:
     """Read only the PR's head SHA through the agent's gh.
 
@@ -141,16 +148,22 @@ def check_text(
         (first, why)
         for why in content.check_review(body, event=str(fields["event"]), posted=posted)
     ]
-    if lint and not problems:
-        rendered = body.splitlines()
-        first_content = next(i for i, line in enumerate(rendered, 1) if line.strip())
-        problems = pr.lint(
-            rendered,
-            first,
-            path=review_doc.LINT_PATH,
-            drop=frozenset({(first_content, H1_ALERT)}),
+    return lint_body(body, first) if lint and not problems else problems
+
+
+def lint_body(body: str, first: int) -> list[pr.Problem]:
+    rendered = body.splitlines()
+    first_content = next(i for i, line in enumerate(rendered, 1) if line.strip())
+    return sorted(
+        set(
+            pr.lint(
+                rendered,
+                first,
+                path=review_doc.LINT_PATH,
+                drop=frozenset({(first_content, H1_ALERT)}),
+            )
         )
-    return sorted(set(problems))
+    )
 
 
 class GhApi:
@@ -204,11 +217,28 @@ def post_event_draft(text: str, number: int) -> int | None:
     return review_doc.send_review(api, path, commit, body.strip("\n") + "\n", event)
 
 
-def post_document(text: str, number: int, author: str | None) -> tuple[str, int | None]:
+def parse_document(text: str, number: int) -> review_doc.ReviewDoc:
     doc = review_doc.parse(text)
     if doc.pr != number:
         message = f"draft must name pull request {number}"
         raise review_doc.ReviewError(message)
+    return doc
+
+
+def check_document(text: str, number: int, *, lint: bool) -> list[pr.Problem]:
+    try:
+        doc = parse_document(text, number)
+    except review_doc.ReviewError as exc:
+        return [(1, str(exc))]
+    first = text.count("\n") - doc.body.count("\n") + 1
+    problems = [
+        (first, why) for why in content.check_review(doc.body, metadata=doc.metadata)
+    ]
+    return lint_body(doc.body, first) if lint and not problems else problems
+
+
+def post_document(text: str, number: int, author: str | None) -> tuple[str, int | None]:
+    doc = parse_document(text, number)
     repo = pr.origin_repository()
     if doc.repo != repo:
         message = f"draft repo {doc.repo} differs from origin repo {repo}"
@@ -218,14 +248,13 @@ def post_document(text: str, number: int, author: str | None) -> tuple[str, int 
 
 
 def post_draft(number: int, author: str | None) -> int:
-    standard = draft_path(number)
-    path = standard.with_suffix(".doc.md")
+    path, document = select_draft(number)
     try:
-        if not path.exists() and standard.exists():
-            path = standard
-            status, review_id = "posted", post_event_draft(path.read_text(), number)
+        text = path.read_text()
+        if document:
+            status, review_id = post_document(text, number, author)
         else:
-            status, review_id = post_document(path.read_text(), number, author)
+            status, review_id = "posted", post_event_draft(text, number)
     except (OSError, RecursionError, SystemExit, ValueError) as exc:
         for problem in str(exc).splitlines():
             print(f"{path}: {problem}", file=sys.stderr)
@@ -306,13 +335,14 @@ def main(argv: list[str], prog: str) -> int:
     if args.command == "draft":
         print(draft(args.number, force=args.force))
         return 0
-    path = draft_path(args.number)
+    path, document = select_draft(args.number)
     try:
         text = path.read_text()
     except (OSError, UnicodeError) as exc:
         problems = [(1, f"cannot read draft: {exc}")]
     else:
-        problems = check_text(text, args.number, lint=not args.no_lint)
+        check_draft = check_document if document else check_text
+        problems = check_draft(text, args.number, lint=not args.no_lint)
     for line, why in problems:
         print(f"{path}:{line}: {why}", file=sys.stderr)
     return 1 if problems else 0
