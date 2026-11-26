@@ -3,11 +3,12 @@
 import json
 import subprocess  # nosec B404
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from tbhbdev.alpha.repo_bootstrap import gh_api
 
-COUNTER = ("run", "@tbhb_rules//lint:pr_size_count", "--")
+DATA = Path(__file__).with_name("size_gate_data")
 COUNT_KEYS = ("code_lines", "code_limit", "raw_lines", "raw_limit")
 
 
@@ -24,15 +25,25 @@ class SizeCountError(Exception):
     """The counter could not run or returned an invalid result."""
 
 
-def size_counts(base: str, head: str, *, bazelisk: str = "bazelisk") -> SizeCounts:
-    """Count added lines between refs using the rules counter.
+def size_counts(
+    base: str, head: str, *, scc: str = "scc", git: str = "git"
+) -> SizeCounts:
+    """Count added lines with the bundled rules counter, without Bazel.
 
     Raises:
         SizeCountError: The command is unavailable, fails or returns bad JSON.
     """
     try:
-        done = subprocess.run(  # nosec B603
-            [bazelisk, *COUNTER, base, head],
+        done = subprocess.run(  # nosec B603 B607
+            [
+                "bash",
+                str(DATA / "pr-size.sh"),
+                base,
+                head,
+                scc,
+                git,
+                str(DATA / "pr-size-exempt.txt"),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -51,13 +62,26 @@ def size_counts(base: str, head: str, *, bazelisk: str = "bazelisk") -> SizeCoun
         not isinstance(data, dict)
         or any(type(data.get(key)) is not int for key in COUNT_KEYS)
         or "failed" not in data
-        or cast("object", data["failed"]) not in ("code", "raw", None)
+        or cast(
+            "object",  # pragma: no mutate -- Type-only argument.
+            data["failed"],
+        )
+        not in ("code", "raw", None)
     ):
         message = "counter returned invalid size counts"
         raise SizeCountError(message)
     return SizeCounts(
-        *(cast("int", data[key]) for key in COUNT_KEYS),
-        failed=cast("str | None", data["failed"]),
+        *(
+            cast(
+                "int",  # pragma: no mutate -- Type-only argument.
+                data[key],
+            )
+            for key in COUNT_KEYS
+        ),
+        failed=cast(
+            "str | None",  # pragma: no mutate -- Type-only argument.
+            data["failed"],
+        ),
     )
 
 
