@@ -343,8 +343,32 @@ def test_post_cli_exists_and_refusals(
 
 
 @pytest.mark.usefixtures("review_cue")
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            BODY.replace("- Read the cache.", "Read the cache."),
+            (
+                "Write Verification as one to six unnumbered bullets "
+                "of at most 20 words each"
+            ),
+        ),
+        (
+            BODY.replace("## Summary", "## Verdict"),
+            "Rename Verdict to Summary and give the reasons for the review",
+        ),
+        (
+            BODY + f"\nVERDICT: BLOCK {HEAD}\n",
+            "Remove the standalone verdict line from Verification",
+        ),
+    ],
+)
 def test_check_and_post_prefer_the_same_document(
-    draft: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    draft: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    body: str,
+    message: str,
 ) -> None:
     standard = draft.with_name("review-384.md")
     standard.write_text(
@@ -360,10 +384,7 @@ def test_check_and_post_prefer_the_same_document(
         "",
         f"{draft}:1: draft must name pull request 384\n",
     )
-    draft.write_text(PREAMBLE + BODY.replace("- Read the cache.", "Read the cache."))
-    message = (
-        "Write Verification as one to six unnumbered bullets of at most 20 words each"
-    )
+    draft.write_text(PREAMBLE + body)
     assert cli.main(["check", "384"], "review") == 1
     first = PREAMBLE.count("\n") + 1
     assert capsys.readouterr() == ("", f"{draft}:{first}: {message}\n")

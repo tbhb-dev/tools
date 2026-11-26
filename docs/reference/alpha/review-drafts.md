@@ -4,8 +4,10 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
+    effort: high
     surface: exec
-    at: "2026-11-26T17:04:47Z"
+    session: sha-256-64:0e394517628b7795
+    at: "2026-11-26T17:32:53Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -19,6 +21,8 @@ type: Reference
 Set `event` to `APPROVE` for `GO` or `REQUEST_CHANGES` for `BLOCK`. The draft also accepts `COMMENT`. The required frontmatter holds `pr`, which must match N, and the full commit hash in `commit_id`. For a run, use its pinned commit. Fill in the body and remove the guidance comments and any empty optional sections. [Review body format and example](../content.md#review-validation)
 
 `tbhbdev alpha review check N` checks frontmatter and validates the Markdown body in `CUE`. By default it also runs the repository's Markdown, spelling, and prose checks. `--no-lint` skips the local prose checks. Both posting paths validate with `CUE`. The local `review post` command also runs the repository's Vale configuration and refuses error-level alerts other than `Vale.Spelling` and `Vale.Terms`.
+
+Replace a legacy Verdict heading with a Summary of the reasons for the review. Keep the final verdict line in the run's final message.
 
 ## Post a review document
 

@@ -266,9 +266,14 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
         (
+            draft("APPROVE").replace("## Summary", "## Verdict"),
+            "review-7.md",
+            "Rename Verdict to Summary and give the reasons for the review",
+        ),
+        (
             draft("APPROVE") + f"\nVERDICT: GO {HEAD}\n",
             "review-7.md",
-            "Write Verification as one to six unnumbered bullets",
+            "Remove the standalone verdict line from Verification",
         ),
         (
             draft() + f"\n<!-- tbhb-review v2 {'e' * 64} -->\n",

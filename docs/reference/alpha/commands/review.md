@@ -4,8 +4,10 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
+    effort: high
     surface: exec
-    at: "2026-11-26T17:04:47Z"
+    session: sha-256-64:0e394517628b7795
+    at: "2026-11-26T17:32:53Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -14,7 +16,7 @@ type: Reference
 
 # Review commands
 
-`review draft N` and `review check N` create and check a review draft. The Summary gives the reasons for the review in one or two sentences and at most 40 words. The review event records the verdict. `review post N [--author LOGIN]` submits an approval or a request for changes and adds a `Generated-by` trailer from the posting session. `review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request. See [Review drafts](../review-drafts.md) for the formats and checks.
+`review draft N` and `review check N` create and check a review draft. The posted Summary gives the reasons for the review in one or two sentences and at most 40 words. The review event records the verdict. `review post N [--author LOGIN]` submits an approval or a request for changes and adds a `Generated-by` trailer from the posting session. `review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request. See [Review drafts](../review-drafts.md) for the formats and checks.
 
 `review threads N [--unresolved]` lists thread IDs, file paths and lines, resolution states, and the first comment's author and first line.
 `review resolve N THREAD` and `review unresolve N THREAD` change one thread by its `PRRT_` ID or a review comment's database ID.

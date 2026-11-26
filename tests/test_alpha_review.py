@@ -239,6 +239,10 @@ def test_events_and_uppercase_hex_pass(event: str) -> None:
             "Rename Verdict to Summary and give the reasons for the review",
         ),
         (
+            BODY + f"\nVERDICT: NO-GO {HEAD}\n",
+            "Remove the standalone verdict line from Verification",
+        ),
+        (
             BODY.replace("- Read the diff", "Read the diff"),
             (
                 "Write Verification as one to six unnumbered bullets "

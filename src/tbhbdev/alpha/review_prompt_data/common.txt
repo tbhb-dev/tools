@@ -1,5 +1,5 @@
 Judge the evidence for ${repo}#${pr}. For a first review, the scope is the pull request's entire change.
-Follow the review template. Give one or two sentences of reasons in Summary, in one paragraph of at most 40 words. Put the verdict only in the review event and the final message.
+Follow the review template. Give one or two sentences of reasons in Summary, in one paragraph of at most 40 words. Record the verdict in draft frontmatter and keep it out of the review body.
 Use Findings only for whole-PR issues. Start each bullet with F1: P1 correctness, F2: P2 design, and so on, starting at 1 without gaps. Use up to eight findings, each with one or two sentences and at most 30 words after the kind. Kinds are correctness, security, design, test, and docs. P0 means harm or a security breach, P1 means broken basic use or correctness, P2 means debt worth fixing soon, and P3 means minor. Cite a path:line in the diff or cite a check and its result. P0 and P1 require REQUEST_CHANGES. Omit task checkboxes and restatements of CI gates.
 Use up to five Suggestions bullets starting with S1:, S2:, and so on, with at most 25 words after each prefix. Omit Findings and Suggestions when empty.
 Use up to six unnumbered Verification bullets with at most 20 words each and no prefixes. Say what you read or ran and what the evidence showed.
