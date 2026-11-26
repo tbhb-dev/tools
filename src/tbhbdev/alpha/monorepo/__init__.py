@@ -9,6 +9,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent.transport import terminal_text
 from tbhbdev.alpha.monorepo import pathmap
@@ -22,26 +23,24 @@ from tbhbdev.alpha.monorepo.source import (
     resolve,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 SUBJECT_LIMIT = 72
 EXIT_ERROR = 2
 
 
-def split(source: str) -> tuple[str, str]:
-    """``CLONE@COMMIT`` as its two halves.
+def source_and_map(source: str, map_file: str) -> tuple[str, str, pathmap.PathMap]:
+    """The clone, the full commit, and the map, which must be for that commit.
 
     Raises:
-        MonorepoError: There is no ``@`` with a clone before it and a commit after.
+        MonorepoError: ``source`` isn't ``CLONE@COMMIT`` or the map is for
+            another commit.
     """
     clone, _, ref = source.rpartition("@")
     if not clone or not ref:
         message = f"{source!r} is not CLONE@COMMIT"
         raise MonorepoError(message)
-    return clone, ref
-
-
-def source_and_map(source: str, map_file: str) -> tuple[str, str, pathmap.PathMap]:
-    """The clone, the full commit, and the map, which must be for that commit."""
-    clone, ref = split(source)
     commit = resolve(clone, ref)
     made = pathmap.load(Path(map_file).read_text(encoding="utf-8"))
     if made.commit != commit:
@@ -63,45 +62,33 @@ def make_map(args: argparse.Namespace) -> int:
     return 0
 
 
-class Written:
-    """What an import puts in the clone, so a failure can take it back."""
+def place(
+    root: Path, folder: Path, dest: str, mode: str, data: bytes
+) -> list[Callable[[], None]]:
+    """Write one file or link and return how to undo it, folders first.
 
-    def __init__(self, root: Path, folder: Path) -> None:
-        self.root = root
-        self.folder = folder
-        self.files: list[Path] = []
-        self.folders: list[Path] = []
-
-    def place(self, dest: str, mode: str, data: bytes) -> None:
-        """Write one file or link, refusing a path that leaves the folder."""
-        target = self.root / dest
-        if not target.parent.resolve().is_relative_to(self.folder):
-            message = (
-                f"{dest} would leave {self.folder.relative_to(self.root.resolve())}"
-            )
-            raise MonorepoError(message)
-        chain = [*reversed(target.parent.parents), target.parent]
-        new = [d for d in chain if d.is_relative_to(self.root) and not d.exists()]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        self.folders.extend(new)
-        if mode == LINK:
-            target.symlink_to(os.fsdecode(data))
-        else:
-            target.write_bytes(data)
-            target.chmod(0o755 if mode == EXECUTABLE else 0o644)
-        self.files.append(target)
-
-    def remove(self) -> None:
-        """Delete the files and then the folders this import created."""
-        for target in self.files:
-            target.unlink(missing_ok=True)
-        for folder in reversed(self.folders):
-            folder.rmdir()
+    Raises:
+        MonorepoError: The path leaves ``folder``.
+    """
+    target = root / dest
+    if not target.parent.resolve().is_relative_to(folder):
+        message = f"{dest} would leave {folder.relative_to(root.resolve())}"
+        raise MonorepoError(message)
+    chain = [*reversed(target.parent.parents), target.parent]
+    made = [d for d in chain if d.is_relative_to(root) and not d.exists()]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if mode == LINK:
+        target.symlink_to(os.fsdecode(data))
+    else:
+        target.write_bytes(data)
+        target.chmod(0o755 if mode == EXECUTABLE else 0o644)
+    return [*(d.rmdir for d in made), target.unlink]
 
 
 def import_files(args: argparse.Namespace) -> int:
     clone, commit, made = source_and_map(args.source, args.map)
-    if problems := made.gaps(files(clone, commit)):
+    listing = files(clone, commit)
+    if problems := made.gaps(listing):
         raise MonorepoError("\n".join(problems))
     into = args.into
     # Git runs from the clone's root, so the root-relative paths below are right
@@ -125,32 +112,23 @@ def import_files(args: argparse.Namespace) -> int:
         f"Copied {len(made.copy)} files, rewrote {len(made.rewrite)} and "
         f"dropped {len(made.drop)}."
     )
-    paths = "\0".join(targets).encode()
-    written = Written(root, root.resolve() / made.dest)
+    undo: list[Callable[[], None]] = []
     try:
-        for _, dest, mode, data in pathmap.outputs(clone, files(clone, commit), made):
-            written.place(dest, mode, data)
+        for _, dest, mode, data in pathmap.outputs(clone, listing, made):
+            undo += place(root, root.resolve() / made.dest, dest, mode, data)
+        paths = "\0".join(targets).encode()
         git(top, "add", "--pathspec-from-file=-", "--pathspec-file-nul", data=paths)
-        message = f"{subject}\n\n{body}\n"
-        git(top, "commit", "--quiet", "-F", "-", data=message.encode())
+        git(top, "commit", "--quiet", "-F", "-", data=f"{subject}\n\n{body}\n".encode())
     except MonorepoError, OSError:
-        # Leave the clone as it was: unstage, then delete what this run wrote.
+        # The clone was clean, so unstaging is a reset. Then delete what this run
+        # wrote: files first, then the folders it created, deepest first.
         try:
-            git(
-                top,
-                "rm",
-                "--cached",
-                "--quiet",
-                "--ignore-unmatch",
-                "--pathspec-from-file=-",
-                "--pathspec-file-nul",
-                data=paths,
-            )
+            git(top, "reset", "--quiet")
         finally:
-            written.remove()
+            for step in reversed(undo):
+                step()
         raise
-    count = len(written.files)
-    print(f"imported {count} files from {made.repo} at {commit[:7]}")
+    print(f"imported {len(targets)} files from {made.repo} at {commit[:7]}")
     return 0
 
 

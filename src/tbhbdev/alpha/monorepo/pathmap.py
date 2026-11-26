@@ -88,15 +88,10 @@ class PathMap:
 
     def gaps(self, listing: Collection[str]) -> list[str]:
         """The disagreements between the map and the source's files."""
+        found, known = set(listing), self.sources()
         return [
-            *(
-                f"{src}: source file is not in the map"
-                for src in sorted(set(listing) - self.sources())
-            ),
-            *(
-                f"{src}: in the map but not in the source"
-                for src in sorted(self.sources() - set(listing))
-            ),
+            *(f"{s}: source file is not in the map" for s in sorted(found - known)),
+            *(f"{s}: in the map but not in the source" for s in sorted(known - found)),
         ]
 
 
