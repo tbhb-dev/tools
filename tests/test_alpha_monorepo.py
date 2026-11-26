@@ -360,6 +360,37 @@ def test_verify_reports_each_kind_of_difference(mono: Path, imported: Imported) 
     assert "verify: 4 problems" in out
 
 
+@pytest.mark.parametrize("target", ["./src/app.py", "src//app.py", "src/app.py/"])
+def test_verify_rejects_changed_symlink_target(imported: Imported, target: str) -> None:
+    link = imported.tree / DEST / "link"
+    link.unlink()
+    link.symlink_to(target)
+    assert imported.problems() == [
+        f"{DEST}/link: differs from link",
+        "verify: 1 problems",
+    ]
+
+
+@pytest.mark.parametrize("key", ['"uses"', "'uses'", "uses"])
+@pytest.mark.parametrize("indicator", [">2-", "|2-", ">-2", "|+2"])
+def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
+    data = (
+        "jobs:\n  check:\n    steps:\n"
+        f"      - {key}: {indicator}\n          o/action@v1\n"
+    ).encode()
+    assert list(
+        verify.references("ci.yaml", data, verify.rules("o/n", set()), "o/n")
+    ) == ["ci.yaml:4: workflow uses an old repository"]
+
+
+@pytest.mark.parametrize("address", ["https://github.com/", "git@github.com:"])
+def test_references_detect_source_repository_names(address: str) -> None:
+    data = f"git clone {address}tbhb-dev/ansible.git\n".encode()
+    assert list(
+        verify.references("clone.sh", data, verify.rules("o/n", set()), "o/n")
+    ) == ["clone.sh:1: address of an old repository"]
+
+
 @pytest.mark.parametrize(
     "extra", ["surprise.txt", "uv.lock", "src/app.py", ".hidden", "nested/stray.txt"]
 )
@@ -468,14 +499,15 @@ def test_verify_reports_io_errors_and_continues(
     (folder / "unexpected.txt").write_bytes(b"extra")
     (folder / "bin/run.sh").chmod(0o644)
     failed = {folder / target, folder / "also-unreadable"}
-    original = cast("Callable[[Path], object]", getattr(Path, method))
+    owner = os if method == "readlink" else Path
+    original = cast("Callable[[Path], object]", getattr(owner, method))
 
     def fail(path: Path) -> object:
         if path in failed:
             raise PermissionError(path)
         return original(path)
 
-    monkeypatch.setattr(Path, method, fail)
+    monkeypatch.setattr(owner, method, fail)
     out = "\n".join(imported.problems())
     assert f"{folder / target}: {rule}:" in out
     if method == "iterdir":
@@ -538,18 +570,48 @@ def test_verify_reports_references_to_every_old_repository(
         ("ci.yml", b"uses:\n  o/action@v1\n", [(1, WORKFLOW)]),
         ("ci.yml", b"uses: >-\n  actions/checkout@v1\n", []),
         ("ci.yml", b"uses: actions/checkout@v1\nname: o/action@v1\n", []),
-        ("ci.yml", b"uses: > o/action@v1\n", []),
+        ("ci.yaml", b'"uses": o/action@v1\n', [(1, WORKFLOW)]),
+        ("ci.yaml", b"'uses': o/action@v1\n", [(1, WORKFLOW)]),
+        ("ci.yaml", b'"us\\u0065s": o/action@v1\n', [(1, WORKFLOW)]),
+        ("ci.yaml", b"jobs: {check: {uses: 'o/action@v1'}}\n", [(1, WORKFLOW)]),
+        ("ci.yaml", b"action: &action o/action@v1\nuses: *action\n", [(2, WORKFLOW)]),
         (
-            "ci.yml",
+            "ci.yaml",
+            b"first: &step {uses: o/action@v1}\nsecond: *step\nloop: &loop [*loop]\n",
+            [(1, WORKFLOW)],
+        ),
+        (
+            "ci.yaml",
+            b"uses: o/first@v1\n---\nuses: o/second@v1\n",
+            [(1, WORKFLOW), (3, WORKFLOW)],
+        ),
+        ("ci.yaml", b"uses: [actions/checkout@v1]\n? [uses]\n: 1\n", []),
+        ("ci.yaml", b"run: |\n  uses: o/action@v1\n", []),
+        ("ci.yaml", b"# empty\n", []),
+        ("ci.yaml", b"---\n", []),
+        ("ci.yaml", b"uses: o/action@v1 # github.com/o/n\n", [(1, WORKFLOW)]),
+        ("script.sh", b"uses: o/action@v1\n", [(1, WORKFLOW)]),
+        ("snippet.sh", b"uses: > o/action@v1\n", []),
+        (
+            "snippet.sh",
             b"github.com/o/n github.com/o/n\nuses: o/action@v1 # github.com/o/n\n",
             [(1, "address of an old repository"), (2, WORKFLOW)],
         ),
     ],
 )
 def test_references(dest: str, data: bytes, findings: list[tuple[int, str]]) -> None:
-    assert list(verify.references(dest, data, verify.rules("o/n", set()))) == [
+    assert list(verify.references(dest, data, verify.rules("o/n", set()), "o/n")) == [
         f"{dest}:{line}: {rule}" for line, rule in findings
     ]
+
+
+@pytest.mark.parametrize("data", [b"uses: > o/action@v1\n", b"uses: [\n", b"\xff"])
+def test_references_reject_invalid_yaml(data: bytes) -> None:
+    findings = list(
+        verify.references("ci.yml", data, verify.rules("o/n", set()), "o/n")
+    )
+    assert len(findings) == 1
+    assert findings[0].startswith("ci.yml: invalid YAML:")
 
 
 def test_import_into_a_subfolder_commits_the_files(

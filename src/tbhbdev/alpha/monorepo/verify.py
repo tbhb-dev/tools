@@ -4,7 +4,10 @@ import os
 import re
 import stat
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from tbhbdev.alpha.monorepo.pathmap import rewrite_bytes
 from tbhbdev.alpha.monorepo.source import (
@@ -25,13 +28,15 @@ if TYPE_CHECKING:
 PROSE = frozenset({".md", ".mdx", ".rst", ".txt", ".adoc"})
 MODULE = re.compile(rb"^module\s+(\S+)", re.MULTILINE)
 # Repositories in the design's "Where each repository goes" path map
-# (wiki/designs/monorepo/C-layout-and-ownership.md). Standalone repos stay out.
+# (wiki/designs/monorepo/C-layout-and-ownership.md), using the source repository
+# names, not their destination folders. Standalone repos stay out.
 OLD_REPOS = (
-    rb"tbhb-dev/(?:agent-capacity|agent-config|agent-memories|ansible-collections|"
+    rb"tbhb-dev/(?:agent-capacity|agent-config|agent-memories|ansible|"
     rb"bazel-r2-cache|dashboard|design|dotfiles|evals|event-gateway|github-metrics|"
     rb"go\.tbhb\.dev|ops|pm|renovate-config|research|rules|runner-smoke|sm|spikes|"
     rb"telemetry|tools|wiki|work)"
 )
+WORKFLOW = "workflow uses an old repository"
 
 
 def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
@@ -46,7 +51,7 @@ def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
     owner, _ = (re.escape(part).encode() for part in repo.split("/"))
     addresses = OLD_REPOS + b"|" + re.escape(repo.encode())
     found = {
-        "workflow uses an old repository": rb"\buses:\s*"
+        WORKFLOW: rb"\buses:\s*"
         rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + owner + rb"/",
         "Renovate preset from an old repository": rb"['\"](?:github|local)>"
         + owner
@@ -62,14 +67,50 @@ def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
     return [(rule, re.compile(pattern)) for rule, pattern in found.items()]
 
 
+def yaml_uses(data: bytes, owner: str) -> Iterator[int]:
+    """Lines of parsed YAML keys whose uses value names the old owner."""
+    pending = list(
+        cast("Iterator[Node]", yaml.compose_all(data, Loader=yaml.SafeLoader))
+    )
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, SequenceNode):
+            pending.extend(node.value)
+        elif isinstance(node, MappingNode):
+            for key, value in node.value:
+                if (
+                    isinstance(key, ScalarNode)
+                    and key.value == "uses"
+                    and isinstance(value, ScalarNode)
+                    and value.value.strip().startswith(f"{owner}/")
+                ):
+                    yield key.start_mark.line + 1
+                pending.append(value)
+
+
 def references(
-    dest: str, data: bytes, patterns: list[tuple[str, re.Pattern[bytes]]]
+    dest: str, data: bytes, patterns: list[tuple[str, re.Pattern[bytes]]], repo: str
 ) -> Iterator[str]:
     """One finding for each line of a non-prose file that matches a rule."""
     if PurePosixPath(dest).suffix in PROSE:
         return
     found: dict[int, str] = {}
+    is_yaml = PurePosixPath(dest).suffix in {".yml", ".yaml"}
+    if is_yaml:
+        try:
+            found.update(
+                (line, WORKFLOW)
+                for line in yaml_uses(data, repo.split("/", maxsplit=1)[0])
+            )
+        except yaml.YAMLError as exc:
+            yield f"{dest}: invalid YAML: {exc}"
     for rule, pattern in patterns:
+        if is_yaml and rule == WORKFLOW:
+            continue
         for match in pattern.finditer(data):
             number = data.count(b"\n", 0, match.start()) + 1
             found.setdefault(number, rule)
@@ -96,7 +137,8 @@ def read(path: Path) -> tuple[str, bytes] | None:
     try:
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
-            return LINK, os.fsencode(path.readlink())
+            # Path.readlink normalizes the target, losing byte differences.
+            return LINK, os.fsencode(os.readlink(path))  # noqa: PTH115
         if stat.S_ISREG(mode):
             git_mode = EXECUTABLE if mode & stat.S_IXUSR else "100644"
             return git_mode, path.read_bytes()
@@ -181,5 +223,5 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
         elif got[1] != wanted:
             problems.append(f"{dest}: differs from {src}")
         elif mode != LINK:
-            problems.extend(references(dest, wanted, patterns))
+            problems.extend(references(dest, wanted, patterns, made.repo))
     return problems
