@@ -1267,16 +1267,20 @@ def test_build_branch_instructions_warn_once_per_match(
     prompt = "\n".join(instructions)
     remote.prompt.write_text(prompt)
 
-    assert launch(remote) == 0
-    assert capsys.readouterr() == (
-        "sample: launched host=example-linux account=agent\n",
-        "".join(
+    assert launch(remote, "--fetch-ref", "refs/heads/agent/other") == 0
+    assert capsys.readouterr().err.splitlines() == [
+        *(
             f"warning: {remote.prompt}: the brief contains {instruction!r}. "
             "The run works on its own branch agent/sample. "
-            "The agent publishes only that branch.\n"
+            "The agent publishes only that branch."
             for instruction in instructions
         ),
-    )
+        *(
+            f"warning: {remote.prompt}: use the launcher branch agent/sample "
+            f"instead of {branch}"
+            for branch in ("feat/4-exporter", "agent/other")
+        ),
+    ]
     assert (remote.state / "sample.prompt").read_text() == prompt
 
 
@@ -1293,26 +1297,56 @@ def test_prohibitions_and_assigned_branch_have_no_branch_advice(
     remote: Remote, capsys: pytest.CaptureFixture[str], prompt: str
 ) -> None:
     remote.prompt.write_text(prompt)
+    options = (
+        "--fetch-ref",
+        "refs/heads/agent/other",
+        "--fetch-ref",
+        "refs/heads/agent/sample",
+    )
+    assert launch(remote, *options) == 0
+    assert "the brief contains" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "git checkout .",
+        "git checkout README.md",
+        "git checkout src/",
+        "git checkout '*.py'",
+        "Implement the retry path. Add a unit test covering the new branch.",
+        "Add a regression test asserting that `git checkout -b topic` is refused.",
+        "Write documentation explaining `git switch topic`.",
+        "Improve the tests. Work on branch coverage.",
+        "- `git checkout -b topic` must be refused with a clear diagnostic.",
+        "git switch feat/4-exporter",
+        "Restore the directory with `git checkout src/tbhbdev/alpha`.",
+        "- `git checkout -b topic` should return status 1",
+        "Document how to push commits to `topic/other`.",
+        "Switch to branch feat/4-exporter. Then implement the exporter.",
+        "Use git checkout main agent/README.md to restore the file.",
+    ],
+)
+def test_build_brief_launch_matches_main(
+    remote: Remote, capsys: pytest.CaptureFixture[str], prompt: str
+) -> None:
+    remote.prompt.write_text(prompt)
     assert launch(remote) == 0
-    assert capsys.readouterr().err == ""
+    assert (
+        capsys.readouterr().out == "sample: launched host=example-linux account=agent\n"
+    )
+    assert remote.records("ssh")
+    request = driver.load(CONFIG, "sample").request
+    assert request.fetch_refs == ()
+    assert request.start_ref is None
+    assert (remote.state / "sample.prompt").read_text() == prompt
 
 
 @pytest.mark.parametrize(
     "prompt",
     [
         "Implement the retry path. Add a unit test covering the new code path.",
-        "Implement the retry path. Add a unit test covering the new branch.",
-        "Add a regression test asserting that `git checkout -b topic` is refused.",
-        "Improve the tests. Work on branch coverage.",
-        "- `git checkout -b topic` must be refused with a clear diagnostic.",
-        "- `git checkout -b topic` should return status 1",
         "Document the `git checkout -b topic` command.",
-        "Document how to push commits to `topic/other`.",
-        "Restore the directory with `git checkout src/tbhbdev/alpha`.",
-        "- `git checkout refs/heads/agent/topic` is forbidden.",
-        "- `git switch agent/topic` should be rejected.",
-        "- `git push origin agent/topic` is forbidden.",
-        "Write documentation explaining `git switch topic`.",
         "Document how `git switch -C topic` works.",
         "Work on branch selection logic.",
         "Diff against branch feat/4-exporter.",
@@ -1327,11 +1361,7 @@ def test_prohibitions_and_assigned_branch_have_no_branch_advice(
         "Never run `git switch --detach HEAD`.",
         "Do not create a new branch. Restore `git checkout README.md`.",
         "Never create branch old. Then create no new branch.",
-        "git checkout README.md",
-        "git checkout src/",
         "git checkout src/README.md",
-        "git checkout '*.py'",
-        "git checkout .",
         "Restore the file with `git checkout ./README.md`.",
         "git checkout ../README.md",
         "git checkout /tmp/README.md",
@@ -1388,16 +1418,20 @@ def test_review_branch_instructions_still_launch(remote: Remote, prompt: str) ->
     [
         "git switch -c agent/other",
         "git push origin HEAD:refs/heads/agent/other",
+        "- `git checkout refs/heads/agent/other` is forbidden.",
+        "- `git switch agent/other` should be rejected.",
+        "- `git push origin agent/other` is forbidden.",
+        "Fix the exporter and push commits to `agent/other`.",
         "Switch to branch feat/4-exporter. Then implement the exporter.",
     ],
 )
 def test_build_branch_instructions_launch_with_start_ref(
-    remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str
+    remote: Remote, instruction: str
 ) -> None:
     remote.prompt.write_text(instruction)
     ref = "refs/heads/agent/other"
     assert launch(remote, "--fetch-ref", ref, "--start-ref", ref) == 0
-    assert len(capsys.readouterr().err.splitlines()) == 1
+    assert driver.load(CONFIG, "sample").request.start_ref == ref
     assert (remote.state / "sample.prompt").read_text() == instruction
 
 
@@ -1498,6 +1532,7 @@ def test_prompt_refuses_unfetched_exact_refs_before_ssh(
         ("Push commits to the PR branch.", "<branch>"),
         ("Update `agent/topic`.", "agent/topic"),
         ("Fix the exporter and push to the existing agent/topic.", "agent/topic"),
+        ("Fix the exporter and push commits to `agent/topic`.", "agent/topic"),
         ("Update refs/heads/topic.", "topic"),
     ],
 )

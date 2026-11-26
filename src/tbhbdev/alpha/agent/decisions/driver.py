@@ -72,25 +72,17 @@ def _unfetched_explicit_refs(
     return [ref for ref in dict.fromkeys(explicit) if ref not in fetch_refs]
 
 
-def build_branch_advice(prompt: str, run: str) -> tuple[str, list[str]]:
-    """Return the brief with branch matches removed and one warning per match."""
+def build_branch_advice(prompt: str, run: str) -> list[str]:
+    """Return one warning per apparent instruction to use a foreign branch."""
     allowed = f"agent/{run}"
-    warnings = []
-
-    def advise(match: re.Match[str]) -> str:
-        branch = match[1].removeprefix("refs/heads/")
-        if branch != allowed and not brief.prohibiting(prompt, match.start()):
-            warnings.append(
-                f"the brief contains {match[0]!r}. "
-                f"The run works on its own branch {allowed}. "
-                "The agent publishes only that branch."
-            )
-        # The ref checks also recognize some branch instructions. A match
-        # here is advisory, so those checks see only the rest of the brief.
-        return " "
-
-    remainder = _BRANCH_TARGET.sub(advise, prompt)
-    return remainder, warnings
+    return [
+        f"the brief contains {match[0]!r}. "
+        f"The run works on its own branch {allowed}. "
+        "The agent publishes only that branch."
+        for match in _BRANCH_TARGET.finditer(prompt)
+        if match[1].removeprefix("refs/heads/") != allowed
+        and not brief.prohibiting(prompt, match.start())
+    ]
 
 
 def prompt_launch_problems(

@@ -338,28 +338,22 @@ def checked_prompt(args: argparse.Namespace) -> str:
         message = f"{args.prompt_file}: brief is empty after the driver restarted"
         raise Invalid(message)
     profile = Profile(args.profile)
-    ref_prompt = prompt
-    branch_advice: list[str] = []
-    if profile is Profile.BUILD:
-        ref_prompt, branch_advice = rules.build_branch_advice(prompt, args.name)
     problems = brief.check_hooks(prompt)
     problems.extend(
-        rules.prompt_launch_problems(
-            ref_prompt, profile, args.fetch_ref, args.start_ref
-        )
+        rules.prompt_launch_problems(prompt, profile, args.fetch_ref, args.start_ref)
     )
     if problems:
         telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
         message = "\n".join(f"{args.prompt_file}: {problem}" for problem in problems)
         raise Invalid(message)
-    branch_advice.extend(
-        brief.branch_warnings(
-            ref_prompt, run=args.name, fetch_refs=tuple(args.fetch_ref)
-        )
-    )
-    for warning in branch_advice:
+    if profile is Profile.BUILD:
+        for warning in rules.build_branch_advice(prompt, args.name):
+            print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
+    for warning in brief.branch_warnings(
+        prompt, run=args.name, fetch_refs=tuple(args.fetch_ref)
+    ):
         print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
-    for ref in rules.unfetched_prompt_refs(ref_prompt, args.fetch_ref):
+    for ref in rules.unfetched_prompt_refs(prompt, args.fetch_ref):
         print(
             f"warning: the prompt names {ref} but this launch has no "
             f"--fetch-ref {ref}; a run whose mirror lacks it may end with no work",

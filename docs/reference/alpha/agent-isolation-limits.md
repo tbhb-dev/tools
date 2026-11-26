@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:24d8ab14130321e1
-    at: "2026-11-26T16:19:51Z"
+    session: sha-256-64:352ebb64e4714f57
+    at: "2026-11-26T16:32:05Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -43,7 +43,7 @@ tbhbdev alpha agent wait example
 
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
-The driver assigns `agent/<run-name>` to each build. When `agent exec --profile build` finds text such as `git checkout -b topic` that targets another branch, it prints one warning per match to standard error and continues the launch. Each warning quotes the match and names the branch the agent works on and can publish. The text check can flag file restores or quoted examples and miss instructions in prose.
+The driver assigns `agent/<run-name>` to each build. When `agent exec --profile build` finds text such as `git checkout -b topic` that targets another branch, it prints one warning per match to standard error. Each warning quotes the match and names the branch the agent works on and can publish. The matcher can flag file restores or quoted examples and miss instructions in prose. The launch checks and the host read the original brief.
 
 With `--start-ref`, the agent still works on `agent/<run-name>`. The driver starts the run from the selected commit and publishes the result to the selected remote branch.
 
