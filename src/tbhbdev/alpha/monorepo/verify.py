@@ -76,33 +76,60 @@ def go_modules(clone: str, listing: dict[str, Blob]) -> set[str]:
 
 
 def read(path: Path) -> tuple[str, bytes] | None:
-    """The git mode and bytes of the link or file at ``path``, if it is one."""
-    if path.is_symlink():
-        return LINK, os.fsencode(path.readlink())
-    if path.is_file():
-        mode = EXECUTABLE if path.stat().st_mode & stat.S_IXUSR else "100644"
-        return mode, path.read_bytes()
+    """The git mode and bytes of the link or file at ``path``, if it is one.
+
+    Raises:
+        MonorepoError: The path can't be inspected or read.
+    """
+    try:
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            return LINK, os.fsencode(path.readlink())
+        if stat.S_ISREG(mode):
+            git_mode = EXECUTABLE if mode & stat.S_IXUSR else "100644"
+            return git_mode, path.read_bytes()
+    except OSError as exc:
+        message = f"{path}: cannot read: {exc}"
+        raise MonorepoError(message) from exc
     return None
 
 
-def inventory(tree: Path, dest: str) -> set[str]:
+def inventory(tree: Path, dest: str, problems: list[str]) -> set[str]:
     """Files and links in the imported area, without following directory links.
+
+    Append scan and stat errors to ``problems`` and continue with other paths.
 
     Raises:
         MonorepoError: A component leading to the imported area is a link.
+        OSError: A component leading to the imported area can't be inspected.
     """
     folder = (tree / dest).absolute()
     for parent in (*reversed(folder.parents), folder):
-        if parent.is_symlink():
+        if stat.S_ISLNK(parent.lstat().st_mode):
             message = f"{parent}: symbolic link in destination path"
             raise MonorepoError(message)
-    if folder.is_file():
+    if stat.S_ISREG(folder.lstat().st_mode):
         return {dest}
-    return {
-        (root / name).relative_to(tree.absolute()).as_posix()
-        for root, _, names in folder.walk(follow_symlinks=False)
-        for name in names
-    }
+    found: set[str] = set()
+    pending = [folder]
+    while pending:
+        folder = pending.pop()
+        try:
+            children = list(folder.iterdir())
+        except OSError as exc:
+            problems.append(f"{folder}: cannot scan: {exc}")
+            continue
+        for child in children:
+            try:
+                mode = child.lstat().st_mode
+            except OSError as exc:
+                problems.append(f"{child}: cannot scan: {exc}")
+                continue
+            if stat.S_ISDIR(mode):
+                pending.append(child)
+                continue
+            found.add(child.relative_to(tree.absolute()).as_posix())
+    return found
 
 
 def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
@@ -112,9 +139,12 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
     patterns = rules(made.repo, go_modules(clone, listing))
     writes = made.writes()
     try:
-        actual = inventory(tree, made.dest)
+        actual = inventory(tree, made.dest, problems)
     except MonorepoError as exc:
         problems.append(str(exc))
+        actual = set()
+    except OSError as exc:
+        problems.append(f"{tree / made.dest}: cannot scan: {exc}")
         actual = set()
     srcs = sorted(listing.keys() & writes.keys())
     expected = {writes[src][0] for src in srcs}
@@ -128,10 +158,10 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
         mode = listing[src].mode
         try:
             wanted = rewrite_bytes(src, data, entry)
+            got = read(tree / dest) if dest in actual else None
         except MonorepoError as exc:
             problems.append(str(exc))
             continue
-        got = read(tree / dest) if dest in actual else None
         if got is None:
             problems.append(f"{dest}: missing from the tree")
         elif got[0] != mode:

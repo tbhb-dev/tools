@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.1-sol
     effort: high
     surface: exec
-    session: sha-256-64:bd4e81ec07b952a8
-    at: "2026-11-26T04:47:39Z"
+    session: sha-256-64:5e455a763821b0df
+    at: "2026-11-26T04:59:30Z"
 status: stable
 tags: [alpha, monorepo]
 title: Monorepo import
@@ -55,12 +55,12 @@ It checks that:
 
 - The map accounts for every source file and lists none that the commit lacks.
 - Every file under the imported folder is a destination produced by the map. Unexpected files, retained drops, and old paths left after a move fail the check.
-- The imported folder and its parents contain no symbolic links. Directory links within the folder are never followed; they count as files whose link targets and kind must match the map.
+- The imported folder and its parents contain no symbolic links. The check treats directory links within the folder as files and compares their targets and kind with the map. It doesn't follow them.
 - Each copied file exists in the tree with the source's bytes, executable bit, and link or file kind.
 - Each rewritten file equals the source with the replacements of the map applied.
 - No copied or rewritten file has an executable reference to an old repository.
 
-Map gaps and stale replacements are reported alongside the other findings. Verification continues through the remaining mapped files and exits nonzero after reporting all the problems it found. Files outside the imported folder are excluded from the comparison.
+After reporting gaps in the map, stale replacements, or paths it can't inspect, verification continues through the remaining files under the imported folder.
 
 An executable reference is a line of a file that isn't prose. Markdown, reStructuredText, AsciiDoc, and plain text files count as prose, since prose that mentions an old repository is a dated record. A line matches when it has one of these:
 

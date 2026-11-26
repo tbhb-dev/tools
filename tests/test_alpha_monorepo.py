@@ -4,7 +4,7 @@ import os
 import subprocess
 import tomllib
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -12,6 +12,9 @@ from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
 from tbhbdev.alpha.monorepo import source, verify
 from tbhbdev.alpha.monorepo.pathmap import Rewrite, dump, load
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 PROG = "tbhbdev alpha monorepo"
 ORIGIN = "https://github.com/tbhb-dev/tools.git"
@@ -512,6 +515,96 @@ def test_verify_rejects_special_files(
         f"{DEST}/src/app.py: missing from the tree",
         "verify: 1 problems",
     ]
+
+
+def test_verify_reports_scan_errors_and_continues(
+    src: Src,
+    mono: Path,
+    tmp_path: Path,
+    capsys: Capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    blocked = [mono / DEST / name for name in ("unreadable", "also-unreadable")]
+    for folder in blocked:
+        folder.mkdir()
+        (folder / "unexpected.txt").write_bytes(b"hidden\n")
+    original = os.scandir
+
+    def scandir(folder: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
+        if Path(folder) in blocked:
+            raise PermissionError(folder)
+        return original(folder)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    assert verify_exit(src, made, mono) == 1
+    out = capsys.readouterr().out
+    for folder in blocked:
+        assert f"{folder}: cannot scan: {folder}" in out
+    assert "verify: 2 problems" in out
+    (mono / DEST / "src/app.py").write_bytes(b"changed\n")
+    assert verify_exit(src, made, mono) == 1
+    out = capsys.readouterr().out
+    assert f"{DEST}/src/app.py: differs from src/app.py" in out
+    assert "verify: 3 problems" in out
+
+
+@pytest.mark.parametrize("target", [".", "unexpected.txt", "src/app.py"])
+def test_verify_reports_stat_errors(
+    src: Src,
+    mono: Path,
+    capsys: Capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    path, commit = src
+    made = make_map(src, mono.parent)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    failed = mono / DEST / target
+    (mono / DEST / "unexpected.txt").write_bytes(b"unexpected\n")
+    original = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        if path == failed:
+            raise PermissionError(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    assert verify_exit(src, made, mono) == 1
+    out = capsys.readouterr().out
+    assert "cannot scan:" in out
+    assert str(failed) in out
+
+
+@pytest.mark.parametrize("method", ["read_bytes", "readlink"])
+def test_verify_reports_read_errors_and_continues(
+    src: Src,
+    mono: Path,
+    capsys: Capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    path, commit = src
+    made = make_map(src, mono.parent)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    original = Path.read_bytes
+
+    def fail(path: Path) -> bytes:
+        if method == "read_bytes" and path.name != "AGENTS.md":
+            return original(path)
+        raise PermissionError(path)
+
+    monkeypatch.setattr(Path, method, fail)
+    (mono / DEST / "bin/run.sh").chmod(0o644)
+    assert verify_exit(src, made, mono) == 1
+    out = capsys.readouterr().out
+    assert "cannot read:" in out
+    assert f"{DEST}/bin/run.sh: mode 100644, source has 100755" in out
 
 
 def test_verify_reports_executable_references(
