@@ -26,6 +26,7 @@ from pathlib import Path
 import httpx
 
 from tbhbdev import userconfig
+from tbhbdev.alpha import codex_trust, install, run_stop_hook
 from tbhbdev.alpha.agent import (
     admission,
     bazel_servers,
@@ -84,6 +85,7 @@ class Prepared:
     delivery: credentials.Delivery
     auth_before: str | None = dataclasses.field(repr=False)
     bases: tuple[Path, ...] = ()
+    start: str | None = None
 
 
 def planned_paths(run: Run) -> RunPaths:
@@ -473,6 +475,18 @@ def hook_environment(value: Policy, *, unsandboxed: bool) -> dict[str, str]:
     return value.env
 
 
+def prepare_codex_config(home: Path, endpoint: str | None, *, headless: bool) -> None:
+    text = otel_config(endpoint) if endpoint is not None else ""
+    if headless:
+        path = home / "hooks.json"
+        config = {"hooks": install.stop_hooks("codex")}
+        runfiles.atomic(path, json.dumps(config))
+        hashes = codex_trust.our_hashes(path, config, install.ours)
+        text = codex_trust.trusted_text(text, path, hashes)
+    if text:
+        runfiles.atomic(home / "config.toml", text)
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
@@ -501,18 +515,26 @@ def prepare_workspace(run: Run) -> Prepared:
     with worktree.preparation_step("audit directory"):
         runfiles.private_dir(Path(paths.audit_dir))
     before = None
+    headless = run.request.kind is RunKind.EXEC
     if run.request.harness is Harness.CODEX:
         with worktree.preparation_step("codex auth copy"):
             runfiles.private_dir(Path(paths.codex_home))
             source = runfiles.private_dir(run.home / ".codex") / "auth.json"
             before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
-        if run.settings.otel_endpoint is not None:
-            with worktree.preparation_step("codex config"):
-                runfiles.atomic(
-                    Path(paths.codex_home) / "config.toml",
-                    otel_config(run.settings.otel_endpoint),
-                )
-    return Prepared(paths, delivery, before, bazel_bases(run.home, str(workspace)))
+        with worktree.preparation_step("codex config"):
+            prepare_codex_config(
+                Path(paths.codex_home), run.settings.otel_endpoint, headless=headless
+            )
+    start = None
+    if headless and run.request.profile is Profile.BUILD and not run.request.no_commit:
+        with worktree.preparation_step("stop hook baseline"):
+            start = push.head(workspace, f"agent/{run.files.name}")
+            if start is None:
+                message = "stop hook baseline: the run branch must be checked out"
+                raise Invalid(message)
+    return Prepared(
+        paths, delivery, before, bazel_bases(run.home, str(workspace)), start
+    )
 
 
 def index_entry(
@@ -686,6 +708,15 @@ def run_harness(
     terminal = None if headless else sys.stdin.fileno()
     streams = (None, None, None)
     if headless:
+        context = run_stop_hook.StopRun(
+            profile=run.request.profile.value,
+            workspace=paths.worktree,
+            reference=f"refs/heads/agent/{run.files.name}",
+            start=prepared.start,
+            counter=str(run.tmpdir / "stop-count"),
+            log=str(run.files.path("log")),
+        )
+        env[run_stop_hook.ENV] = json.dumps(context)
         streams = (
             stack.enter_context(run.files.path("prompt").open()),
             stack.enter_context(run.files.path("out").open("w")),

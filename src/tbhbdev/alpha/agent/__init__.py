@@ -66,7 +66,8 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument(
         "--expect-commit",
         action=argparse.BooleanOptionalAction,
-        help="require a new commit and a push (default for builds)",
+        help="require a new commit and a push (default for builds); "
+        "--no-expect-commit waives both and the Stop hook accepts a clean build",
     )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")

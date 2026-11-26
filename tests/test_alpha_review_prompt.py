@@ -144,7 +144,7 @@ def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> Non
     assert "exactly one `.git/tbhb-alpha/review-385.md`" in prompt
     prompt_lines = prompt.splitlines()
     assert f"VERDICT: GO {HEAD}" in prompt_lines
-    assert f"VERDICT: NO-GO {HEAD}" in prompt_lines
+    assert f"VERDICT: BLOCK {HEAD}" in prompt_lines
     assert "VERDICT" not in review_prompt.skeleton(tier, delta, variant, fields)
 
 

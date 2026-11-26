@@ -27,6 +27,7 @@ from tbhbdev.alpha import (
     install,
     loop,
     pre_push_guard,
+    run_stop_hook,
     session_context,
     state_guard,
     verify_range,
@@ -51,6 +52,7 @@ __all__ = [
     "loop",
     "main",
     "pre_push_guard",
+    "run_stop_hook",
     "session_context",
     "state_guard",
     "verify_range",
@@ -106,6 +108,7 @@ commands:
                installed build on each host
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
+  run-stop-hook <claude|codex|antigravity>: check whether an exec run can stop
   pre-push-guard REMOTE URL: refuse protected-branch and unfetched-rewrite pushes
   brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
@@ -224,6 +227,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "pre-push-guard": pre_push_guard.main,
     "loop": loop.main,
     "agent": agent.main,
+    "run-stop-hook": run_stop_hook.main,
     "brief": brief.main,
 }
 
