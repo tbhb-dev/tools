@@ -6,7 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: medium
     surface: exec
-    at: "2026-11-26T01:32:52Z"
+    session: sha-256-64:6e402d15023f0de1
+    at: "2026-11-26T01:38:57Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -58,9 +59,11 @@ For a build using its own branch, run-host checks for new commits after the harn
 
 | Exit status | Result |
 | --- | --- |
-| 0 | The build succeeds, including the fast-forward when needed for `--start-ref`. |
+| 0 | The build meets its commit and push requirements, or the host posts the review. |
 | 4 | The commit check or the `--start-ref` push fails. The log starts the reason line with `commit check failed:`, `push skipped:`, or `push failed:`. |
-| 6 | `--expect-commit` required a new commit, and the run produced none. The log starts the reason line with `no new commit:`. |
+| 6 | The build produced no new commit with `--expect-commit` enabled by default. The log starts the reason line with `no new commit:`. |
+| 9 | The build's own branch did not get a new tip on origin or the host could not verify it. The log starts the reason line with `push failed:`. |
+| 10 | The harness succeeded but the host did not post a review. The log starts the reason line with `review not posted:`. |
 
 The commit check refuses new tips outside the starting commit's ancestry and lists their count and short commit IDs in the log. It also refuses a checked-out run branch when new commits exist only on other branches.
 

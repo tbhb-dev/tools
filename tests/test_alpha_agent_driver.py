@@ -105,7 +105,7 @@ def test_exec_help_describes_expected_commits(
     assert agent.main(["exec", "--help"], "example agent") == 0
     help_text = " ".join(capsys.readouterr().out.split())
     assert (
-        "--expect-commit return status 6 if a successful build produced no new commit"
+        "--expect-commit, --no-expect-commit require a new commit and a push"
         in help_text
     )
 
@@ -252,7 +252,6 @@ def test_launch_stream_and_metadata(
             "one",
             "--role",
             "worker",
-            "--expect-commit",
             "--fetch-ref",
             "refs/pull/391/head",
             "--fetch-ref",
@@ -641,16 +640,26 @@ def test_a_different_role_or_class_alone_is_still_a_duplicate(
         driver.refuse_live_duplicate(CONFIG, second)
 
 
-def test_exec_refuses_expect_commit_on_a_review(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("flag", ["--expect-commit", "--no-expect-commit"])
+def test_exec_refuses_commit_flags_on_a_review(
+    remote: Remote, capsys: pytest.CaptureFixture[str], flag: str
 ) -> None:
-    assert (
-        launch(remote, "--profile", "review", "--ref", COMMIT, "--expect-commit") == 1
-    )
+    assert launch(remote, "--profile", "review", "--ref", COMMIT, flag) == 1
     assert (
         "request expect_commit applies only to a build run" in capsys.readouterr().err
     )
     assert remote.records("ssh") == []
+
+
+@pytest.mark.parametrize(
+    ("flag", "required"), [("--expect-commit", True), ("--no-expect-commit", False)]
+)
+def test_exec_accepts_explicit_commit_policy(
+    remote: Remote, flag: str, *, required: bool
+) -> None:
+    assert launch(remote, flag) == 0
+    data = json.loads((remote.state / "sample.request.json").read_text())
+    assert data["expect_commit"] is required
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
@@ -889,7 +898,9 @@ def test_status_reports_an_unreachable_host_with_the_local_record(
         (4, "push refused: the draft is committed"),
         (5, "pr not opened: no draft"),
         (4, "commit check failed: cannot check new commits (TimeoutExpired)"),
-        (6, "no new commit: the brief expected one (--expect-commit)"),
+        (6, "no new commit: the build required one (--expect-commit)"),
+        (9, "push failed: no new tip for agent/sample on origin"),
+        (10, "review not posted: the pull request head moved since the run judged it"),
     ],
 )
 def test_status_shows_the_last_publication_reason(
