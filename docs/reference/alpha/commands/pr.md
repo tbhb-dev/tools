@@ -2,12 +2,12 @@
 description: Checking, creating, editing, readying, rerunning, closing and rebasing pull requests, and reading their checks.
 generated:
   - role: generated
-    harness: claude-code:2.1.319
-    model: anthropic:claude-sonnet-5-5
+    harness: codex:0.166.0
+    model: openai:gpt-6.1-sol
     effort: high
-    surface: sdk-cli
-    session: sha-256-64:e23dce32b8825437
-    at: "2026-11-26T03:16:54Z"
+    surface: exec
+    session: sha-256-64:88dde4f9530b87d4
+    at: "2026-11-26T06:03:21Z"
 status: stable
 tags: [alpha]
 title: Pull request commands
@@ -31,12 +31,9 @@ It refuses fork heads, `main`, protected branches, and unreadable metadata.
 It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body.
 It skips checked boxes and stops at the first failure.
 
-`tbhbdev alpha pr check` and `pr create` run the rules size counter after linting the draft, comparing the draft's base branch on `origin` with `HEAD`.
-A missing remote-tracking ref is fetched once.
-It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines.
-If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests.
-When both counts exceed their limits, the problem reports the code count.
-If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
+`tbhbdev alpha pr check` and `pr create` compare the draft's base branch on `origin` with `HEAD` after linting the draft. They run a bundled copy of the rules size counter through Bash and `scc` 4.1.0, without starting Bazel. The base remote-tracking ref is refreshed once, except in a dry run. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
+
+Install `scc` with `mise install`; the Bazel tool shims also provide it. The count uses a three-dot diff and the same exemption policy as CI: lockfiles, generated and vendored files, test data, snapshots and prose are exempt; configuration languages count only toward the raw limit. `.github/pr-size-exempt.txt` adds repository path globs.
 
 `tbhbdev alpha pr checks N` reads pull request N in the current repository.
 It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses.
