@@ -71,9 +71,14 @@ def prompt_branch_problems(prompt: str, run: str) -> list[str]:
     )
     allowed = f"agent/{run}"
     for match in brief.BRANCH_INSTRUCTION.finditer(prose):
-        branch = match[1].rstrip(".,")
-        if branch.startswith("-") or brief.prohibiting(prose, match.start()):
+        branch = match[1]
+        # Options and explicit paths cannot name a branch. Check before stripping
+        # prose punctuation so `git checkout .` remains a file restoration.
+        if branch.startswith(("-", ".", "/")) or brief.prohibiting(
+            prose, match.start()
+        ):
             continue
+        branch = branch.rstrip(".,")
         if branch.removeprefix("refs/heads/") != allowed:
             return [
                 (
