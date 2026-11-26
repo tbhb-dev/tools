@@ -638,12 +638,69 @@ def test_verify_reports_executable_references(
     ]
 
 
+@pytest.mark.parametrize("indicator", [">", ">-", "|", "|-"])
+def test_verify_reports_block_scalar_workflow_references(
+    src: Src, mono: Path, capsys: Capsys, indicator: str
+) -> None:
+    path, _ = src
+    workflow = path / "ci/block.yml"
+    workflow.parent.mkdir()
+    workflow.write_text(
+        "on: push\njobs:\n  check:\n"
+        f"    uses: {indicator}\n"
+        "      tbhb-dev/rules/.github/workflows/check.yml@v1\n"
+    )
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert verify_exit((path, commit), made, mono) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{DEST}/ci/block.yml:4: workflow uses an old repository",
+        "verify: 1 problems",
+    ]
+
+
 def test_references_skip_prose_lines_of_other_files_still_count() -> None:
     patterns = verify.rules("o/n", set())
     assert list(verify.references("a.md", b"github.com/o/n\n", patterns)) == []
     assert list(verify.references("a.sh", b"ok\ngithub.com/o/n\n", patterns)) == [
         "a.sh:2: address of the source repository"
     ]
+
+
+def test_references_keep_line_order_and_first_rule_per_line() -> None:
+    data = b"github.com/o/n github.com/o/n\nuses: o/action@v1 # github.com/o/n\n"
+    assert list(verify.references("ci.yml", data, verify.rules("o/n", set()))) == [
+        "ci.yml:1: address of the source repository",
+        "ci.yml:2: workflow uses an old repository",
+    ]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"uses: > # folded\r\n\r\n  o/action@v1\r\n",
+        b"uses: |+\n  o/action@v1\n",
+        b"uses:\n  o/action@v1\n",
+    ],
+)
+def test_references_allow_multiline_workflow_values(data: bytes) -> None:
+    assert list(verify.references("ci.yml", data, verify.rules("o/n", set()))) == [
+        "ci.yml:1: workflow uses an old repository"
+    ]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"uses: >-\n  actions/checkout@v1\n",
+        b"uses: actions/checkout@v1\nname: o/action@v1\n",
+        b"uses: > o/action@v1\n",
+    ],
+)
+def test_references_ignore_other_workflow_values(data: bytes) -> None:
+    assert list(verify.references("ci.yml", data, verify.rules("o/n", set()))) == []
 
 
 def test_import_into_a_subfolder_commits_the_files(

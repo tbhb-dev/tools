@@ -36,7 +36,8 @@ def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
     """
     owner, name = (re.escape(part).encode() for part in repo.split("/"))
     found = {
-        "workflow uses an old repository": rb"\buses:\s*['\"]?" + owner + rb"/",
+        "workflow uses an old repository": rb"\buses:\s*"
+        rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + owner + rb"/",
         "Renovate preset from an old repository": rb"['\"](?:github|local)>"
         + owner
         + rb"/",
@@ -59,10 +60,13 @@ def references(
     """One finding for each line of a non-prose file that matches a rule."""
     if PurePosixPath(dest).suffix in PROSE:
         return
-    for number, line in enumerate(data.split(b"\n"), 1):
-        rule = next((rule for rule, p in patterns if p.search(line)), None)
-        if rule:
-            yield f"{dest}:{number}: {rule}"
+    found: dict[int, str] = {}
+    for rule, pattern in patterns:
+        for match in pattern.finditer(data):
+            number = data.count(b"\n", 0, match.start()) + 1
+            found.setdefault(number, rule)
+    for number, rule in sorted(found.items()):
+        yield f"{dest}:{number}: {rule}"
 
 
 def go_modules(clone: str, listing: dict[str, Blob]) -> set[str]:
