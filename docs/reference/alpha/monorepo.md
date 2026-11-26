@@ -1,5 +1,5 @@
 ---
-description: Mapping a public repository's files at one commit and importing them into the monorepo.
+description: Mapping, importing and verifying a public repository's files at one commit.
 generated:
   - role: generated
     harness: claude-code
@@ -43,3 +43,23 @@ Before it writes anything, the command refuses when any of these hold:
 An import never overwrites a file. `--into` can be any folder of the clone, and destinations are relative to the clone's root. It also refuses a destination that leads outside the map's folder through a symbolic link in the clone. When a write fails, it removes the files it already wrote. Files keep the source's bytes and executable bit, and a symbolic link in the source stays a symbolic link with the same target. A `replace` pair whose old text isn't in the file is an error, because a stale map would otherwise copy the file unchanged.
 
 Subjects read `feat(FOLDER): import REPO at SHORT`, with the repository name and the first 7 characters of the hash. Its body gives the source repository and the full commit hash, then counts the copied, rewritten, and dropped files. Hooks of the monorepo clone run on the commit, which has no parent in the source repository. Exit code 0 is success. Exit code 2 is a refusal or a Git error.
+
+## Verify
+
+`verify CLONE@COMMIT --map MAP --tree MONOREPO` is the command that the monorepo's required `import` job runs. It reads the source at the commit and the files in the tree. Its output is one line for each problem, then `verify: N problems`. Exit code 0 means no problems, 1 means problems, and 2 means the command couldn't run.
+
+It checks that:
+
+- The map accounts for every source file and lists none that the commit lacks.
+- Each copied file exists in the tree with the source's bytes, executable bit, and link or file kind.
+- Each rewritten file equals the source with the replacements of the map applied.
+- No copied or rewritten file has an executable reference to an old repository.
+
+An executable reference is a line of a file that isn't prose. Markdown, reStructuredText, AsciiDoc, and plain text files count as prose, since prose that mentions an old repository is a dated record. A line matches when it has one of these:
+
+- A workflow `uses:` line for any repository of the source's owner.
+- A Renovate `github>` or `local>` preset from any repository of the owner.
+- A clone address of the source repository, `github.com/OWNER/NAME` or `github.com:OWNER/NAME`. This covers Bazel overrides, scripts, and Go import paths on GitHub.
+- A module path from one of the source's `go.mod` files, which covers a vanity import path.
+
+Each finding reads `DEST:LINE: RULE`, and a line reports the first rule it matches. Symbolic links aren't scanned. The check can't find a reference to a repository of another owner, because it has no list of the other old repositories.

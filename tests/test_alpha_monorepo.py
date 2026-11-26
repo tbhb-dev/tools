@@ -1,4 +1,4 @@
-"""Small real repositories exercise the monorepo commands without a network."""
+"""Small real repositories exercise map, import and verify without a network."""
 
 import os
 import subprocess
@@ -10,18 +10,13 @@ import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
-from tbhbdev.alpha.monorepo import pathmap, source
+from tbhbdev.alpha.monorepo import pathmap, source, verify
 
 PROG = "tbhbdev alpha monorepo"
-
 ORIGIN = "https://github.com/tbhb-dev/tools.git"
-
 DEST = "factory/tbhbdev"
-
 APP = b"print('hello')\n"
-
 AGENTS = b"Read tbhb-dev/tools for the rules.\n"
-
 SOURCE_FILES: dict[str, bytes] = {
     "README.md": b"Clone https://github.com/tbhb-dev/tools as a record.\n",
     "src/app.py": APP,
@@ -87,8 +82,6 @@ def mono(tmp_path: Path) -> Path:
 
 
 type Src = tuple[Path, str]
-
-
 type Capsys = pytest.CaptureFixture[str]
 
 
@@ -132,6 +125,7 @@ def test_map_copies_and_drops(src: Src, capsys: Capsys) -> None:
     dropped = cast("dict[str, str]", data["drop"])
     assert set(dropped) == {"uv.lock", ".github/workflows/ci.yml", "LICENSES/a.txt"}
     assert dropped["uv.lock"] == "root configuration (uv.lock)"
+    assert pathmap.load(out).drop == dropped
 
 
 def test_map_takes_a_repo_and_needs_a_github_origin(src: Src, capsys: Capsys) -> None:
@@ -204,6 +198,13 @@ def test_import_copies_byte_for_byte_in_one_commit(
     assert message.startswith(f"feat({DEST}): import tools at {commit[:7]}\n")
     assert f"Source repository: tbhb-dev/tools\nSource commit: {commit}\n" in message
     assert "Copied 5 files, rewrote 0 and dropped 3." in message
+    assert verify_exit(src, made, mono) == 0
+    assert "verify: 0 problems" in capsys.readouterr().out
+
+
+def verify_exit(src: Src, made: Path, mono: Path) -> int:
+    path, commit = src
+    return run("verify", f"{path}@{commit}", "--map", str(made), "--tree", str(mono))
 
 
 def rewritten(
@@ -224,7 +225,9 @@ def rewritten(
     return path
 
 
-def test_rewrite_applies_replacements(src: Src, mono: Path, tmp_path: Path) -> None:
+def test_rewrite_applies_replacements_and_verify_recomputes_them(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
     path, commit = src
     made = rewritten(src, tmp_path)
     assert run_import(f"{path}@{commit}", made, mono) == 0
@@ -232,6 +235,11 @@ def test_rewrite_applies_replacements(src: Src, mono: Path, tmp_path: Path) -> N
         b"Read tbhb-dev/mono/factory/tbhbdev for the rules.\n"
     )
     assert "rewrote 1" in git(mono, "log", "-1", "--format=%B")
+    capsys.readouterr()
+    assert verify_exit(src, made, mono) == 0
+    (mono / DEST / "AGENTS.md").write_bytes(AGENTS)
+    assert verify_exit(src, made, mono) == 1
+    assert f"{DEST}/AGENTS.md: differs from AGENTS.md" in capsys.readouterr().out
 
 
 def test_a_stale_replacement_leaves_nothing_behind(
@@ -247,6 +255,8 @@ def test_a_stale_replacement_leaves_nothing_behind(
     assert git(mono, "rev-parse", "HEAD") == before
     assert not (mono / DEST / "src/app.py").exists()
     assert not (mono / DEST / "AGENTS.md").exists()
+    assert verify_exit(src, made, mono) == 1
+    assert "replacement 'nowhere'" in capsys.readouterr().out
 
 
 def import_error(src: Src, made: Path, mono: Path, capsys: Capsys) -> str:
@@ -318,6 +328,100 @@ def test_import_does_not_write_through_a_symlinked_folder(
     assert not list(outside.iterdir())
 
 
+def test_verify_reports_each_kind_of_difference(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    folder = mono / DEST
+    (folder / "src/app.py").write_bytes(b"changed\n")
+    (folder / "README.md").unlink()
+    (folder / "bin/run.sh").chmod(0o644)
+    (folder / "link").unlink()
+    (folder / "link").write_text("not a link")
+    (folder / "AGENTS.md").unlink()
+    (folder / "AGENTS.md").mkdir()
+    assert verify_exit(src, made, mono) == 1
+    out = capsys.readouterr().out
+    assert f"{DEST}/src/app.py: differs from src/app.py" in out
+    assert f"{DEST}/README.md: missing from the tree" in out
+    assert f"{DEST}/bin/run.sh: mode 100644, source has 100755" in out
+    assert f"{DEST}/link: mode 100644, source has 120000" in out
+    assert f"{DEST}/AGENTS.md: missing from the tree" in out
+    assert "verify: 5 problems" in out
+
+
+def test_verify_requires_the_map_to_account_for_every_file(
+    src: Src, tmp_path: Path, capsys: Capsys
+) -> None:
+    made = make_map(
+        src,
+        tmp_path,
+        edit={
+            '"uv.lock" = "root configuration (uv.lock)"\n': "",
+            "[drop]\n": '[drop]\n"ghost" = "never existed"\n',
+        },
+    )
+    assert verify_exit(src, made, tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "uv.lock: source file is not in the map" in out
+    assert "ghost: in the map but not in the source" in out
+
+
+def test_verify_reports_executable_references(
+    tmp_path: Path, mono: Path, capsys: Capsys
+) -> None:
+    path = tmp_path / "old"
+    path.mkdir()
+    git(path, "init", "-q")
+    git(path, "remote", "add", "origin", ORIGIN)
+    tree = {
+        "bin/run.sh": b"git clone git@github.com:tbhb-dev/tools.git\n",
+        "ci/a.yml": b"  - uses: 'tbhb-dev/rules/.github/workflows/x.yml@v1'\n",
+        "renovate.json5": b"",
+        "ci/renovate.json": b'{"extends": ["github>tbhb-dev/renovate-config"]}\n',
+        "MODULE.bazel.txt": b"",
+        "deps/MODULE.bazel": b'git_override(remote = "https://github.com/tbhb-dev/tools")\n',
+        "go.mod": b"module go.example.dev/tools\n",
+        "main.go": b'import "go.example.dev/tools/pkg"\n',
+        "fine.go": b'import "go.example.dev/toolbox"\nuses: actions/checkout@abc\n',
+        "docs/NOTE.md": b"see github.com/tbhb-dev/tools\n",
+        "vendor/tools": b"github.com/tbhb-dev/toolset\nx\n",
+    }
+    for name, data in tree.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_bytes(data)
+    (path / "link").symlink_to("github.com/tbhb-dev/tools")
+    commit = commit_all(path)
+    made = tmp_path / "map.toml"
+    assert run("map", str(path), commit, "--dest", DEST, "-o", str(made)) == 0
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert (
+        run("verify", f"{path}@{commit}", "--map", str(made), "--tree", str(mono)) == 1
+    )
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        f"{DEST}/bin/run.sh:1: address of the source repository",
+        f"{DEST}/ci/a.yml:1: workflow uses an old repository",
+        f"{DEST}/ci/renovate.json:1: Renovate preset from an old repository",
+        f"{DEST}/deps/MODULE.bazel:1: address of the source repository",
+        f"{DEST}/go.mod:1: Go path go.example.dev/tools",
+        f"{DEST}/main.go:1: Go path go.example.dev/tools",
+        "verify: 6 problems",
+    ]
+
+
+def test_references_skip_prose_lines_of_other_files_still_count() -> None:
+    patterns = verify.rules("o/n", set())
+    assert list(verify.references("a.md", b"github.com/o/n\n", patterns)) == []
+    assert list(verify.references("a.sh", b"ok\ngithub.com/o/n\n", patterns)) == [
+        "a.sh:2: address of the source repository"
+    ]
+
+
 def load_error(text: str) -> str:
     with pytest.raises(source.MonorepoError) as caught:
         pathmap.load(text)
@@ -370,6 +474,7 @@ def test_the_command_line_parses_and_dispatches(
     assert run("--help") == 0
     assert "import a public repository" not in capsys.readouterr().err
     assert run() == 2
+    assert run("verify") == 2
     capsys.readouterr()
     assert alpha.main(["monorepo", "-h"], "tbhbdev alpha") == 0
     assert "monorepo" in alpha.USAGE

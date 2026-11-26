@@ -1,8 +1,8 @@
 """`tbhbdev alpha monorepo`: import a public repository into the monorepo.
 
-`map` lists every file of a source commit as copied, dropped or rewritten, and
-`import` copies them into a monorepo clone as one commit. Public-origin
-repositories only.
+`map` lists every file of a source commit as copied, dropped or rewritten,
+`import` copies them into a monorepo clone as one commit, and `verify` is what
+the monorepo's required `import` job runs. Public-origin repositories only.
 """
 
 import argparse
@@ -21,8 +21,10 @@ from tbhbdev.alpha.monorepo.source import (
     origin_repo,
     resolve,
 )
+from tbhbdev.alpha.monorepo.verify import check
 
 SUBJECT_LIMIT = 72
+EXIT_PROBLEMS = 1
 EXIT_ERROR = 2
 
 
@@ -128,6 +130,15 @@ def import_files(args: argparse.Namespace) -> int:
     return 0
 
 
+def verify_tree(args: argparse.Namespace) -> int:
+    clone, commit, made = source_and_map(args.source, args.map)
+    problems = check(clone, commit, made, Path(args.tree))
+    for problem in problems:
+        print(terminal_text(problem))
+    print(f"verify: {len(problems)} problems")
+    return EXIT_PROBLEMS if problems else 0
+
+
 def parser(prog: str) -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog=prog, description=__doc__)
     sub = top.add_subparsers(dest="command", required=True)
@@ -141,10 +152,14 @@ def parser(prog: str) -> argparse.ArgumentParser:
     two.add_argument("source", metavar="CLONE@COMMIT")
     two.add_argument("--map", required=True)
     two.add_argument("--into", required=True, metavar="MONOREPO_CLONE")
+    three = sub.add_parser("verify", help="check an import against its source")
+    three.add_argument("source", metavar="CLONE@COMMIT")
+    three.add_argument("--map", required=True)
+    three.add_argument("--tree", required=True, metavar="MONOREPO_CLONE")
     return top
 
 
-COMMANDS = {"map": make_map, "import": import_files}
+COMMANDS = {"map": make_map, "import": import_files, "verify": verify_tree}
 
 
 def main(argv: list[str], prog: str) -> int:
