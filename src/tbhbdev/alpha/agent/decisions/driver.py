@@ -126,7 +126,7 @@ def check(
             "For a build run use --fetch-ref REF --start-ref REF"
         )
         raise Invalid(message)
-    if ref is None and run.profile is Profile.REVIEW:
+    if not ref and run.profile is Profile.REVIEW:
         message = "a review run needs --ref with the full commit hash to review"
         raise Invalid(message)
     if run.harness is Harness.CLAUDE:

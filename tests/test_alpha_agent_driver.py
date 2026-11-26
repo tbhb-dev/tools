@@ -398,6 +398,15 @@ def test_review_without_ref_starts_nothing(
     assert remote.records("ssh") == []
 
 
+def test_review_check_refuses_empty_ref(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--profile", "review", "--ref", "") == 1
+    assert "a review run needs --ref" in capsys.readouterr().err
+    assert remote.records("ssh") == []
+    assert not driver.metadata_path("sample").exists()
+
+
 OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 
 
