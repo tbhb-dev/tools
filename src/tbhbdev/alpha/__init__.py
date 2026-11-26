@@ -101,6 +101,8 @@ commands:
   repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
                apply the standard repository settings
   merge        merge an approved pull request
+  monorepo     map CLONE COMMIT --dest FOLDER [--repo OWNER/NAME] [-o FILE]:
+               write the path map for importing a public repository
   verify-range BASE TIP [-C PATH]: check every agent commit in a range
   version-check [--host NAME ...] [--expect SHA|latest] [--json]: compare the
                installed build on each host
@@ -195,6 +197,12 @@ def merge(argv: list[str], prog: str) -> int:
     return squash_merge.main(argv, prog=prog)
 
 
+def monorepo_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import monorepo  # noqa: PLC0415 -- see the docstring
+
+    return monorepo.main(argv, prog)
+
+
 def install_command(argv: list[str], prog: str) -> int:
     return install.main(argv, prog)
 
@@ -218,6 +226,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-app": gh_app_command,
     "repo": repo_command,
     "merge": merge,
+    "monorepo": monorepo_command,
     "verify-range": verify_range.main,
     "version-check": version_check.main,
     "install": install_command,
