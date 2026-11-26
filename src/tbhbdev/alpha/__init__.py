@@ -108,7 +108,8 @@ commands:
                apply the standard repository settings
   merge        merge an approved pull request
   monorepo     map CLONE COMMIT --dest FOLDER | import CLONE@COMMIT --map MAP
-               --into CLONE: import a public repository into the monorepo
+               --into CLONE | verify CLONE@COMMIT --map MAP --tree CLONE:
+               import a public repository into the monorepo
   verify-range BASE TIP [-C PATH]: check every agent commit in a range
   version-check [--host NAME ...] [--expect SHA|latest] [--json]: compare the
                installed build on each host
