@@ -73,6 +73,35 @@ def test_pass_with_a_third_approval() -> None:
     assert evaluate([*GOOD, review("agy", number=3)], messages=[]) == []
 
 
+@pytest.mark.parametrize("harness", ["agy", "gemini"])
+def test_antigravity_author_may_not_approve_as_agy_or_gemini(harness: str) -> None:
+    approved = [*GOOD, review(harness, number=3)]
+    assert evaluate(approved) == ["approved by google, which wrote the head commits"]
+
+
+@pytest.mark.parametrize("head", ["", "abc", "A" * 40, "g" * 40, HEAD + "0"])
+def test_a_malformed_head_fails_the_gate(head: str) -> None:
+    pull = gate.Pull(head, [review(commit=head, body=stamp("claude"))], [], [])
+    assert gate.evaluate(APP, pull) == [
+        f"the pull request head {head!r} is not a full commit SHA"
+    ]
+
+
+def test_a_stamp_judged_at_another_head_counts_for_nothing() -> None:
+    old = f"Run r1, codex m, judged head {OLD}.\n"
+    stale = [review("claude", number=1), review(number=2, body=old)]
+    assert evaluate(stale) == [
+        "review 2 names no known harness",
+        "1 approvals at the head, need 2",
+        "1 approving providers, need 2",
+    ]
+
+
+def test_logins_compare_case_insensitively() -> None:
+    shouted = [review("claude", login=APP.upper(), number=1), *GOOD[1:]]
+    assert evaluate(shouted) == []
+
+
 def test_no_approvals() -> None:
     assert evaluate([]) == [
         "0 approvals at the head, need 2",
@@ -148,6 +177,7 @@ def test_an_approval_without_a_known_harness(body: str) -> None:
         ("cancelled", "completed", "check ci is cancelled"),
         (None, "in_progress", "check ci is in_progress"),
         ("timed_out", "completed", "check ci is timed_out"),
+        ("success", "in_progress", "check ci is in_progress"),
     ],
 )
 def test_a_check_that_did_not_finish_well(
