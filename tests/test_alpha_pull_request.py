@@ -3463,7 +3463,9 @@ def test_rerun_retries_failed_jobs_of_the_current_head(
                 "stdout": json.dumps({"headRefOid": head}),
                 "stderr": "",
             },
-            "run list": gh_list([{"databaseId": 123, "conclusion": "failure"}]),
+            "api repos/{owner}/{repo}/actions/runs?": gh_list(
+                [{"workflow_runs": [{"id": 123, "conclusion": "failure"}]}]
+            ),
         },
     )
     assert run_main("rerun", "45") == rc
@@ -3473,14 +3475,10 @@ def test_rerun_retries_failed_jobs_of_the_current_head(
     assert [call["argv"] for call in calls] == [
         ["pr", "view", "45", "--json", "headRefOid"],
         [
-            "run",
-            "list",
-            "--commit",
-            head,
-            "--limit",
-            "1",
-            "--json",
-            "databaseId,conclusion",
+            "api",
+            f"repos/{{owner}}/{{repo}}/actions/runs?head_sha={head}&per_page=100",
+            "--paginate",
+            "--slurp",
         ],
         ["run", "rerun", "123", "--failed"],
     ]
@@ -3491,11 +3489,11 @@ def test_rerun_retries_failed_jobs_of_the_current_head(
     "runs",
     [
         [],
-        [{"databaseId": 123, "conclusion": "success"}],
-        [{"databaseId": 123, "conclusion": ""}],
+        [{"id": 123, "conclusion": "success"}],
+        [{"id": 123, "conclusion": ""}],
         [
-            {"databaseId": 123, "conclusion": "success"},
-            {"databaseId": 122, "conclusion": "failure"},
+            {"id": 123, "conclusion": "success"},
+            {"id": 122, "conclusion": "cancelled"},
         ],
     ],
 )
@@ -3510,12 +3508,47 @@ def test_rerun_reports_no_failed_run(
                 "stdout": json.dumps({"headRefOid": "a" * 40}),
                 "stderr": "",
             },
-            "run list": gh_list(runs),
+            "api repos/{owner}/{repo}/actions/runs?": gh_list(
+                [{"workflow_runs": runs}]
+            ),
         },
     )
     assert run_main("rerun", "45") == 1
     assert capsys.readouterr().err == "no failed run for the current head of PR 45\n"
     assert len(world.calls("gh")) == 2
+
+
+@pytest.mark.parametrize(("first_rc", "last_rc"), [(0, 0), (3, 0), (0, 4), (3, 4)])
+def test_rerun_retries_failed_run_when_newest_passed(
+    world: World, first_rc: int, last_rc: int
+) -> None:
+    runs: list[dict[str, object]] = [
+        {"id": 125, "conclusion": "success"},
+        {"id": 124, "conclusion": "failure"},
+        {"id": 123, "conclusion": ""},
+        {"id": 122, "conclusion": "failure"},
+    ]
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": "a" * 40}),
+                "stderr": "",
+            },
+            "api repos/{owner}/{repo}/actions/runs?": gh_list(
+                [{"workflow_runs": runs[:2]}, {"workflow_runs": runs[2:]}]
+            ),
+            "run rerun 124": {"rc": first_rc, "stdout": "", "stderr": ""},
+            "run rerun 122": {"rc": last_rc, "stdout": "", "stderr": ""},
+            "run list": gh_list([{"databaseId": 125, "conclusion": "success"}]),
+        },
+    )
+    assert run_main("rerun", "45") == (first_rc or last_rc)
+    assert [call["argv"] for call in world.calls("gh")][2:] == [
+        ["run", "rerun", "124", "--failed"],
+        ["run", "rerun", "122", "--failed"],
+    ]
 
 
 NOW = dt.datetime(2026, 11, 23, 18, 0, tzinfo=dt.UTC)

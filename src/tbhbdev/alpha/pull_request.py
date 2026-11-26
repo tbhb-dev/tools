@@ -88,9 +88,10 @@ contains one.
 in order, but only when its GitHub author is the account this ``gh`` runs as. It
 stops at the first failure and doesn't read a draft.
 
-``rerun N`` reruns only the failed jobs of the latest run for pull request N's
+``rerun N`` reruns the failed jobs of every failed run for pull request N's
 current head commit with ``gh run rerun --failed``. It reports an error when
-that run hasn't failed or no run exists. It doesn't read a draft.
+no failed run exists, and attempts every rerun even if one fails, returning
+the first failure's exit code. It doesn't read a draft.
 
 ``rerun N --stuck`` cancels a ``pull_request`` run of pull request N's current
 head when one of its jobs has been in progress for over an hour, then reruns
@@ -1844,29 +1845,34 @@ def rerun_stuck(number: int) -> int:
 
 
 def rerun(number: int) -> int:
-    """Rerun the failed jobs of PR N's latest current-head run.
+    """Rerun the failed jobs of every failed run for PR N's current head.
 
     Raises:
         SystemExit: gh can't read the pull request or its runs.
     """
-    runs = gh_json(
+    head = head_of(number)
+    pages = gh_json(
         [
-            "run",
-            "list",
-            "--commit",
-            head_of(number),
-            "--limit",
-            "1",
-            "--json",
-            "databaseId,conclusion",
+            "api",
+            f"repos/{{owner}}/{{repo}}/actions/runs?head_sha={head}&per_page=100",
+            "--paginate",
+            "--slurp",
         ]
     )
-    if not runs or runs[0]["conclusion"] != "failure":
+    failed = [
+        item
+        for page in pages
+        for item in cast("list[dict[str, object]]", page["workflow_runs"])
+        if item["conclusion"] == "failure"
+    ]
+    if not failed:
         print(f"no failed run for the current head of PR {number}", file=sys.stderr)
         return 1
-    return invoke_gh([GH, "run", "rerun", str(runs[0]["databaseId"]), "--failed"], "")[
-        0
-    ]
+    code = 0
+    for item in failed:
+        result = invoke_gh([GH, "run", "rerun", str(item["id"]), "--failed"], "")[0]
+        code = code or result
+    return code
 
 
 GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})

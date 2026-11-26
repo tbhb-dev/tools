@@ -500,6 +500,10 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
                 f"\n{reading.text}",
                 end="",
             )
+            if reading.rc and not reading.launched:
+                # A refusal before the harness starts must release both claims
+                # so the name can be used again. Keep the refusal log in trash.
+                clean(settings, run, force=True)
             return reading.rc or 0
         if action == "launched":
             print(
