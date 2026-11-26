@@ -27,6 +27,20 @@ def test_bad_name(name: str) -> None:
         driver.check_name(name)
 
 
+@pytest.mark.parametrize(
+    ("prompt", "profile"),
+    [
+        ("The earlier PR was on `agent/topic`.", Profile.BUILD),
+        ("Do not update the PR branch or use agent/topic.", Profile.BUILD),
+        ("Update the PR branch.", Profile.REVIEW),
+    ],
+)
+def test_prompt_without_a_build_update_or_explicit_ref_problem(
+    prompt: str, profile: Profile
+) -> None:
+    assert driver.prompt_launch_problems(prompt, profile, [], None) == []
+
+
 @pytest.mark.parametrize("account", [None, "agent", "ops"])
 def test_host(account: str | None) -> None:
     host = driver.select_host(CONFIG, "example-linux", account)
@@ -51,15 +65,28 @@ def test_bad_host(host: str, account: str | None, message: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("exists", "ref", "message"),
+    ("existing_name", "ref", "message"),
     [
-        (True, None, "run metadata already exists; clean first"),
-        (False, "main", "--ref applies only to a review run"),
+        (
+            "example",
+            None,
+            "run metadata already exists. Run `tbhbdev alpha agent clean example`",
+        ),
+        (
+            None,
+            "main",
+            (
+                "--ref applies only to a review run. "
+                "For a build run use --fetch-ref REF --start-ref REF"
+            ),
+        ),
     ],
 )
-def test_check_refuses(exists: bool, ref: str | None, message: str) -> None:
+def test_check_refuses(
+    existing_name: str | None, ref: str | None, message: str
+) -> None:
     with pytest.raises(Invalid) as caught:
-        driver.check(RUN, CONFIG, LINUX, ref=ref, exists=exists)
+        driver.check(RUN, CONFIG, LINUX, existing_name=existing_name, ref=ref)
     assert str(caught.value) == message
 
 
@@ -69,20 +96,20 @@ def test_profile(profile: str | None) -> None:
         request.parse(CLAUDE, host_allows_unsandboxed=True), claude_profile=profile
     )
     assert driver.check(
-        run, CONFIG, LINUX, ref=None, exists=False
+        run, CONFIG, LINUX, existing_name=None, ref=None
     ) == dataclasses.replace(run, claude_profile="primary")
 
 
 def test_unknown_profile() -> None:
     run = dataclasses.replace(RUN, harness=Harness.CLAUDE, claude_profile="Missing")
     with pytest.raises(Invalid, match="claude profile 'Missing' isn't defined"):
-        driver.check(run, CONFIG, LINUX, ref=None, exists=False)
+        driver.check(run, CONFIG, LINUX, existing_name=None, ref=None)
 
 
 def test_review_ref_allowed() -> None:
     run = dataclasses.replace(RUN, profile=Profile.REVIEW, commit=COMMIT)
-    assert driver.check(run, CONFIG, LINUX, ref="topic", exists=False) == run
-    assert driver.check(RUN, CONFIG, LINUX, ref=None, exists=False) == RUN
+    assert driver.check(run, CONFIG, LINUX, existing_name=None, ref="topic") == run
+    assert driver.check(RUN, CONFIG, LINUX, existing_name=None, ref=None) == RUN
 
 
 @pytest.mark.parametrize(
@@ -273,14 +300,14 @@ def test_model(harness: Harness, model: str, allow: bool, valid: bool) -> None:
 
 def test_unsandboxed_host_flag_does_not_gate_validation() -> None:
     run = dataclasses.replace(RUN, unsandboxed=True, authorized_by=None)
-    assert driver.check(run, CONFIG, LINUX, ref=None, exists=False) == run
+    assert driver.check(run, CONFIG, LINUX, existing_name=None, ref=None) == run
     assert (
         driver.check(
             run,
             CONFIG,
             dataclasses.replace(LINUX, unsandboxed=False),
+            existing_name=None,
             ref=None,
-            exists=False,
         )
         == run
     )
