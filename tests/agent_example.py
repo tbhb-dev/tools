@@ -93,7 +93,8 @@ def settings(
             for account in ("agent", "ops")
         ),
         claude=model.Claude(
-            "primary", (model.ClaudeProfile("primary", reference, reference),)
+            "primary",
+            (model.ClaudeProfile("primary", reference, reference),),
         ),
         hosts=(LINUX, MACOS),
     )

@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 from unittest.mock import Mock, call
+lazy from pathlib import Path
 
 import pytest
 
@@ -19,22 +20,117 @@ GOOD = {
 }
 
 
+@pytest.mark.parametrize(
+    ("source_lines", "yaml_lines", "expected"),
+    [
+        (375, 2, sg.SizeCounts(411, 400, 416, 1500, "code")),
+        (364, 1097, sg.SizeCounts(400, 400, 1500, 1500, None)),
+        (364, 1098, sg.SizeCounts(400, 400, 1501, 1500, "raw")),
+        (365, 1098, sg.SizeCounts(401, 400, 1502, 1500, "code")),
+    ],
+)
+def test_size_count_matches_rules_counting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_lines: int,
+    yaml_lines: int,
+    expected: sg.SizeCounts,
+) -> None:
+    """CI counts BUILD code too, while exempting prose and generated files."""
+    monkeypatch.chdir(tmp_path)
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], text=True).strip()
+
+    git("init", "-q")
+    git(
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "base",
+        "--allow-empty",
+    )
+    base = git("rev-parse", "HEAD")
+    for name, content in {
+        "source.py": "x = 1\n" * source_lines + "# comment\n\n",
+        "BUILD": "x = 1\n" * 9,
+        "BUILD.bazel": "x = 1\n" * 9,
+        "MODULE.bazel": "x = 1\n" * 9,
+        "tool.bzl": "x = 1\n" * 9,
+        "config.yaml": "key: value\n" * yaml_lines,
+        "readme.md": "prose\n" * 500,
+        "uv.lock": "x = 1\n" * 500,
+        "vendor/a.py": "x = 1\n" * 500,
+        "tests/testdata/a.py": "x = 1\n" * 500,
+        "generated.py": "# Code generated; DO NOT EDIT.\n" + "x = 1\n" * 500,
+        ".gitattributes": "marked.py linguist-generated\n",
+        "marked.py": "x = 1\n" * 500,
+        ".github/pr-size-exempt.txt": "# Local exemptions\n\nlocal/*",
+        "local/a.py": "x = 1\n" * 500,
+        "binary.py": "\0binary\n",
+    }.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        "change",
+    )
+    runner = sg.subprocess.run
+
+    def without_bazel(
+        argv: list[str], *, capture_output: bool, text: bool, check: bool
+    ) -> subprocess.CompletedProcess[str]:
+        assert "bazel" not in argv[0], "the controller must not start Bazel"
+        return runner(argv, capture_output=capture_output, text=text, check=check)
+
+    monkeypatch.setattr(sg.subprocess, "run", without_bazel)
+    assert sg.size_counts(base, "HEAD") == expected
+
+
 @pytest.mark.parametrize("failed", [None, "code", "raw"])
-def test_counts(monkeypatch: pytest.MonkeyPatch, failed: str | None) -> None:
+@pytest.mark.parametrize("tools", [{}, {"scc": "/tools/scc", "git": "/tools/git"}])
+def test_counts(
+    monkeypatch: pytest.MonkeyPatch, failed: str | None, tools: dict[str, str]
+) -> None:
     runner = Mock(
         return_value=subprocess.CompletedProcess(
             [], 0, json.dumps({**GOOD, "failed": failed}), ""
         )
     )
     monkeypatch.setattr(sg.subprocess, "run", runner)
-    assert sg.size_counts("origin/main", "HEAD") == sg.SizeCounts(
+    assert sg.size_counts("origin/main", "HEAD", **tools) == sg.SizeCounts(
         400, 400, 1500, 1500, failed
     )
     assert runner.call_count == 1
-    assert runner.call_args.args == (["bazelisk", *sg.COUNTER, "origin/main", "HEAD"],)
+    assert runner.call_args.args == (
+        [
+            "bash",
+            str(sg.DATA / "pr-size.sh"),
+            "origin/main",
+            "HEAD",
+            tools.get("scc", "scc"),
+            tools.get("git", "git"),
+            str(sg.DATA / "pr-size-exempt.txt"),
+        ],
+    )
+    assert runner.call_args.kwargs == {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
 
 
-@pytest.mark.parametrize("error", [OSError("no bazelisk"), None])
+@pytest.mark.parametrize("error", [OSError("no bash"), None])
 @pytest.mark.parametrize("stderr", ["missing target\n", ""])
 def test_counter_errors(
     monkeypatch: pytest.MonkeyPatch, error: OSError | None, stderr: str
@@ -43,7 +139,7 @@ def test_counter_errors(
         side_effect=error, return_value=subprocess.CompletedProcess([], 2, "", stderr)
     )
     monkeypatch.setattr(sg.subprocess, "run", runner)
-    reason = "no bazelisk" if error else (stderr.strip() or "counter exited 2")
+    reason = "no bash" if error else (stderr.strip() or "counter exited 2")
     with pytest.raises(sg.SizeCountError, match=reason):
         sg.size_counts("base", "head")
 
@@ -55,7 +151,7 @@ def test_bad_json(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
         "run",
         Mock(return_value=subprocess.CompletedProcess([], 0, stdout, "")),
     )
-    with pytest.raises(sg.SizeCountError, match="invalid JSON"):
+    with pytest.raises(sg.SizeCountError, match=r"^counter returned invalid JSON$"):
         sg.size_counts("base", "head")
 
 
@@ -83,7 +179,9 @@ def test_bad_counts(monkeypatch: pytest.MonkeyPatch, data: object) -> None:
         "run",
         Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(data), "")),
     )
-    with pytest.raises(sg.SizeCountError, match="invalid size counts"):
+    with pytest.raises(
+        sg.SizeCountError, match=r"^counter returned invalid size counts$"
+    ):
         sg.size_counts("base", "head")
 
 
@@ -156,7 +254,7 @@ def test_pr_check(
     ) == bool(problem)
     lint.assert_called_once_with("draft.md")
     counter.assert_called_once_with(
-        "refs/remotes/origin/main", "HEAD", bazelisk="/tools/bazelisk"
+        "refs/remotes/origin/main", "HEAD", scc="/tools/scc", git="/tools/git"
     )
     captured = capsys.readouterr()
     assert captured.err == ""
@@ -245,7 +343,7 @@ def test_pr_create_size(
     assert call(*fetched) in git.call_args_list
     if failure != "base":
         counter.assert_called_once_with(
-            "refs/remotes/origin/main", "HEAD", bazelisk="/tools/bazelisk"
+            "refs/remotes/origin/main", "HEAD", scc="/tools/scc", git="/tools/git"
         )
 
 
@@ -264,7 +362,7 @@ def test_the_base_is_refreshed_without_tags_then_counted(
         *FETCH, "origin", "+refs/heads/topic:refs/remotes/origin/topic"
     )
     counter.assert_called_once_with(
-        "refs/remotes/origin/topic", "HEAD", bazelisk="bazelisk"
+        "refs/remotes/origin/topic", "HEAD", scc="scc", git="git"
     )
 
 
@@ -361,4 +459,7 @@ def test_a_dry_run_fetches_nothing_and_warns_on_an_excess(
     failing = Mock(return_value=(1, ""))
     monkeypatch.setattr(pr, "git", failing)
     pr.check_size(args, checked)
+    assert capsys.readouterr().err == (
+        "size count unavailable: base branch refs/remotes/origin/main not found\n"
+    )
     assert all(c.args[0] != "fetch" for c in failing.call_args_list)
