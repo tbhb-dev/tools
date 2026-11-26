@@ -1,17 +1,17 @@
 """Small real repositories exercise the monorepo commands without a network."""
 
+import os
 import subprocess
 import tomllib
-from typing import TYPE_CHECKING, cast
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
 from tbhbdev.alpha.monorepo import source
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tbhbdev.alpha.monorepo.pathmap import Rewrite, load
 
 PROG = "tbhbdev alpha monorepo"
 
@@ -77,6 +77,16 @@ def src(tmp_path: Path) -> Src:
     return path, commit_all(path)
 
 
+@pytest.fixture
+def mono(tmp_path: Path) -> Path:
+    path = tmp_path / "mono"
+    path.mkdir()
+    git(path, "init", "-q")
+    (path / "README.md").write_text("monorepo\n")
+    commit_all(path, "chore: start")
+    return path
+
+
 type Src = tuple[Path, str]
 
 
@@ -85,6 +95,22 @@ type Capsys = pytest.CaptureFixture[str]
 
 def run(*argv: str) -> int:
     return monorepo.main(list(argv), PROG)
+
+
+def run_import(source: str, made: Path, mono: Path) -> int:
+    return run("import", source, "--map", str(made), "--into", str(mono))
+
+
+def make_map(src: Src, tmp_path: Path, *, edit: dict[str, str] | None = None) -> Path:
+    path, commit = src
+    target = tmp_path / "map.toml"
+    assert run("map", str(path), commit, "--dest", DEST, "-o", str(target)) == 0
+    text = target.read_text()
+    for old, new in (edit or {}).items():
+        assert old in text
+        text = text.replace(old, new)
+    target.write_text(text)
+    return target
 
 
 def table(text: str) -> dict[str, object]:
@@ -152,6 +178,220 @@ def test_map_refuses_submodules_and_odd_paths(src: Src, capsys: Capsys) -> None:
     git(path, "commit", "-q", "-m", "odd")
     assert run("map", str(path), "HEAD", "--dest", DEST) == 2
     assert "isn't UTF-8" in capsys.readouterr().err
+
+
+def test_import_copies_byte_for_byte_in_one_commit(
+    src: Src,
+    mono: Path,
+    tmp_path: Path,
+    capsys: Capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    before = git(mono, "rev-parse", "HEAD").strip()
+    monkeypatch.setattr(source, "BATCH", 2)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    assert "imported 5 files from tbhb-dev/tools at" in capsys.readouterr().out
+    assert (mono / DEST / "src/app.py").read_bytes() == APP
+    assert os.access(mono / DEST / "bin/run.sh", os.X_OK)
+    assert not os.access(mono / DEST / "src/app.py", os.X_OK)
+    assert (mono / DEST / "link").readlink() == Path("src/app.py")
+    assert not (mono / DEST / "uv.lock").exists()
+    assert git(mono, "rev-list", "--count", f"{before}..HEAD").strip() == "1"
+    assert git(mono, "rev-parse", "HEAD~").strip() == before
+    assert git(mono, "status", "--porcelain") == ""
+    message = git(mono, "log", "-1", "--format=%B")
+    assert message.startswith(f"feat({DEST}): import tools at {commit[:7]}\n")
+    assert f"Source repository: tbhb-dev/tools\nSource commit: {commit}\n" in message
+    assert "Copied 5 files, rewrote 0 and dropped 3." in message
+
+
+def rewritten(src: Src, tmp_path: Path, old: str, name: str) -> Path:
+    entry = f'"{name}" = "{DEST}/{name}"\n'
+    head = f'[rewrite."{name}"]\ndest = "{DEST}/{name}"\n'
+    return make_map(
+        src,
+        tmp_path,
+        edit={entry: "", "[rewrite]\n": f'{head}replace = [["{old}", "x"]]\n'},
+    )
+
+
+def test_rewrite_applies_replacements(src: Src, mono: Path, tmp_path: Path) -> None:
+    path, commit = src
+    made = rewritten(src, tmp_path, "tbhb-dev/tools", "AGENTS.md")
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    assert (mono / DEST / "AGENTS.md").read_bytes() == (b"Read x for the rules.\n")
+    assert "rewrote 1" in git(mono, "log", "-1", "--format=%B")
+
+
+def test_a_stale_replacement_leaves_nothing_behind(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    made = rewritten(src, tmp_path, old="nowhere", name="src/app.py")
+    before = git(mono, "rev-parse", "HEAD")
+    assert run_import(f"{path}@{commit}", made, mono) == 2
+    assert (
+        "src/app.py: replacement 'nowhere' isn't in the file" in capsys.readouterr().err
+    )
+    assert git(mono, "rev-parse", "HEAD") == before
+    assert not (mono / DEST / "src/app.py").exists()
+    assert not (mono / DEST / "AGENTS.md").exists()
+
+
+def import_error(src: Src, made: Path, mono: Path, capsys: Capsys) -> str:
+    path, commit = src
+    assert run_import(f"{path}@{commit}", made, mono) == 2
+    return capsys.readouterr().err
+
+
+def test_import_refuses_unsafe_starting_points(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    made = make_map(src, tmp_path)
+    (mono / "new.txt").write_text("x")
+    assert "has uncommitted changes" in import_error(src, made, mono, capsys)
+    commit_all(mono)
+    (mono / DEST).mkdir(parents=True)
+    (mono / DEST / "README.md").write_text("mine")
+    commit_all(mono)
+    assert f"already in {mono}: {DEST}/README.md" in import_error(
+        src, made, mono, capsys
+    )
+
+
+def test_import_refuses_a_bad_source_or_map(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    for bad in ("nothing", f"{path}@"):
+        assert run_import(bad, made, mono) == 2
+        assert "is not CLONE@COMMIT" in capsys.readouterr().err
+    path.joinpath("later.txt").write_bytes(b"x\n")
+    later = commit_all(path)
+    assert run_import(f"{path}@{later}", made, mono) == 2
+    assert f"the map is for {commit}, not {later}" in capsys.readouterr().err
+
+
+def test_import_refuses_a_map_that_misses_files(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    made = make_map(
+        src, tmp_path, edit={'"uv.lock" = "root configuration (uv.lock)"\n': ""}
+    )
+    assert "uv.lock: source file is not in the map" in import_error(
+        src, made, mono, capsys
+    )
+
+
+def test_import_refuses_a_long_subject(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    made = make_map(src, tmp_path, edit={DEST: f"factory/{'f' * 60}"})
+    assert "the subject is over 72 characters" in import_error(src, made, mono, capsys)
+
+
+def test_import_does_not_write_through_a_symlinked_folder(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    made = make_map(src, tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (mono / "factory").mkdir()
+    (mono / "factory/tbhbdev").symlink_to(outside)
+    commit_all(mono)
+    assert "would leave factory/tbhbdev" in import_error(src, made, mono, capsys)
+    assert not list(outside.iterdir())
+
+
+def test_import_into_a_subfolder_commits_the_files(
+    src: Src, mono: Path, tmp_path: Path
+) -> None:
+    path, commit = src
+    (mono / "sub").mkdir()
+    (mono / "sub/keep.txt").write_text("keep\n")
+    commit_all(mono)
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono / "sub") == 0
+    listed = git(mono, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert f"{DEST}/src/app.py" in listed
+    assert len([n for n in listed if n.startswith(f"{DEST}/")]) == 5
+    assert git(mono, "status", "--porcelain") == ""
+
+
+def untouched(mono: Path, before: str) -> None:
+    assert git(mono, "rev-parse", "HEAD") == before
+    assert git(mono, "status", "--porcelain") == ""
+    assert git(mono, "diff", "--cached", "--name-only") == ""
+    assert not (mono / "factory").exists()
+
+
+def test_an_ignored_destination_rolls_everything_back(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    (mono / ".gitignore").write_text("factory/\n")
+    commit_all(mono)
+    before = git(mono, "rev-parse", "HEAD")
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 2
+    assert "git add failed" in capsys.readouterr().err
+    untouched(mono, before)
+    assert git(mono, "status", "--porcelain", "--ignored") == ""
+
+
+def test_a_failing_hook_rolls_everything_back(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    before = git(mono, "rev-parse", "HEAD")
+    hook = mono / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 2
+    assert "git commit failed" in capsys.readouterr().err
+    untouched(mono, before)
+    hook.unlink()
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+
+
+def load_error(text: str) -> str:
+    with pytest.raises(source.MonorepoError) as caught:
+        load(text)
+    return str(caught.value)
+
+
+HEAD = 'repo = "o/n"\ncommit = "abc"\ndest = "d"\n'
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("= nope", "not valid TOML"),
+        ('commit = "a"\ndest = "d"\n', "map value repo must be a string"),
+        ('repo = "n"\ncommit = "a"\ndest = "d"\n', "must be OWNER/NAME"),
+        (HEAD + "copy = 1\n", "map key 'copy' must be a table"),
+        (HEAD + "[copy]\na = 1\n", "map value a must be a string"),
+        (HEAD + '[copy]\na = "d/a"\n[drop]\na = "x"\n', "more than one table"),
+        (HEAD + '[copy]\na = "d/x"\nb = "d/x"\n', "writes one path twice"),
+        (HEAD + '[copy]\na = "e/a"\n', "bad path 'e/a'"),
+        (
+            HEAD + '[rewrite.a]\ndest = "d/a"\nreplace = [["x", 2]]\n',
+            "list of [old, new]",
+        ),
+        (HEAD + "[rewrite.a]\n", "map value a dest must be a string"),
+    ],
+)
+def test_load_refuses_a_malformed_map(text: str, message: str) -> None:
+    assert message in load_error(text)
+
+
+def test_load_accepts_a_rewrite_without_replacements() -> None:
+    made = load(HEAD + '[rewrite.a]\ndest = "d/a"\n')
+    assert made.rewrite["a"] == Rewrite("d/a", [])
 
 
 def test_git_reports_a_missing_git_and_a_failed_command(

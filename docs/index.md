@@ -26,5 +26,5 @@ okf_version: "0.2"
 * [No self-approval](reference/alpha/no-self-approval.md) - Pull request authorship, approval guards, and closing commands.
 * [Review drafts](reference/alpha/review-drafts.md) - Drafting and checking pull request reviews.
 * [Repository settings](reference/alpha/repository-settings.md) - Standard repository settings and bootstrap behavior.
-* [Monorepo import](reference/alpha/monorepo.md) - Mapping a public repository's files at one commit for import.
+* [Monorepo import](reference/alpha/monorepo.md) - Mapping a public repository's files at one commit and importing them.
 * [GitHub polling](reference/alpha/github-polling.md) - GitHub event delivery, polling guards, and request budgets.
