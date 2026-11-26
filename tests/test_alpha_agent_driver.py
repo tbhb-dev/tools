@@ -1635,7 +1635,7 @@ def test_exec_spends_one_startup_budget(
         if script == remote_commands.limits():
             assert timeout == 110
             steps.append("limits")
-            return "0.5 4 12582912 6291456 100 0"
+            return "0.5 4 12582912 6291456 100 0 -"
         assert script == remote_commands.installed(CONFIG.hosts[0])
         assert timeout == 100
         steps.append("preflight")

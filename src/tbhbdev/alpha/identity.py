@@ -2440,12 +2440,18 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     leaves it alone. The ``-x`` line is the fallback for a missing
     ``CHERRY_PICK_HEAD``.
 
+    Git also passes ``merge`` for every merge commit, ``git merge --no-commit``
+    followed by a plain ``git commit`` included. An agent session stamps that
+    commit like an ordinary one, so a run can commit a merge of the base branch.
+    A human merge, a squash and a rebase replay stay unstamped.
+
     A rebase also sets ``CHERRY_PICK_HEAD`` for each commit it replays, so while
     one is in progress nothing is a pick and the commit is handled as it always was.
     """
     replaying = rebasing()
     head = pick_head(replaying=replaying)
-    if source in {"merge", "squash"} and not head:
+    agent_merge = source == "merge" and not replaying and detect(env)
+    if not head and source in {"merge", "squash"} and not agent_merge:
         return 0
     repo = repo_info()
     if not repo:

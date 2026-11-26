@@ -3166,13 +3166,20 @@ def test_add_trailers_keeps_a_human_signoff_in_place(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("repo")
-def test_cmd_trailer_skips_merges_and_squashes(tmp_path: Path) -> None:
+def test_cmd_trailer_skips_squashes_and_human_merges(tmp_path: Path) -> None:
     path = msg_file(tmp_path)
-    for source in ("merge", "squash"):
-        assert ai.cmd_trailer(str(path), source, CLAUDE_COMMIT_ENV) == 0
+    assert ai.cmd_trailer(str(path), "squash", CLAUDE_COMMIT_ENV) == 0
+    assert ai.cmd_trailer(str(path), "merge", {}) == 0
     assert path.read_text(encoding="utf-8") == "subject\n\nbody\n"
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
     assert "Generated-by" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.usefixtures("repo")
+def test_cmd_trailer_stamps_an_agent_merge(tmp_path: Path) -> None:
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), "merge", CLAUDE_COMMIT_ENV) == 0
+    assert "Generated-by: LLM " in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.usefixtures("repo", "plain")
@@ -3833,8 +3840,8 @@ def test_main_dispatch(
     assert ai.main(["record", "antigravity", "extra"], {}) == 0
     assert ai.main(["trailer", str(path)], {}) == 0
     assert ai.main(["trailer", str(path), "message", "sha"], {}) == 0
-    assert ai.main(["trailer", str(path), "merge"], CLAUDE_COMMIT_ENV) == 0
-    env_source = {**CLAUDE_COMMIT_ENV, ai.SOURCE_ENV: "merge"}
+    assert ai.main(["trailer", str(path), "squash"], CLAUDE_COMMIT_ENV) == 0
+    env_source = {**CLAUDE_COMMIT_ENV, ai.SOURCE_ENV: "squash"}
     assert ai.main(["trailer", str(path)], env_source) == 0
     assert path.read_text(encoding="utf-8") == "subject\n\nbody\n"
     assert ai.main(["consume"], {}) == 0
@@ -3941,7 +3948,7 @@ def test_run_fails_a_crashed_commit_hook(
 
 
 def test_run_passes_the_environment() -> None:
-    # A merge commit's source, from the environment, makes trailer a no-op.
+    # A human merge commit's source, from the environment, makes trailer a no-op.
     assert ai.run(["trailer", "MSG"], {ai.SOURCE_ENV: "merge"}) == 0
 
 
@@ -4022,6 +4029,8 @@ def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     # Mutmut's marker would make the child look up mutmut's config from the
     # temp repo; the child runs the module unmutated.
     env.pop("MUTANT_UNDER_TEST", None)
+    # An inherited model would stamp every child as an agent run.
+    env.pop(ai.RUN_MODEL_ENV, None)
     env.update(extra or {})
     return env
 
@@ -4388,23 +4397,41 @@ def test_e2e_malformed_trailer_is_rejected(wired: Path) -> None:
 
 
 @needs_prek
-def test_e2e_merge_commits_get_no_trailers(wired: Path) -> None:
+@pytest.mark.parametrize(
+    ("env", "stamped"),
+    [
+        (CLAUDE_E2E | {ai.RUN_MODEL_ENV: "claude-opus-5-5"}, True),
+        (
+            {
+                f"GIT_{role}_{field}": value
+                for role in ("AUTHOR", "COMMITTER")
+                for field, value in (("NAME", "Human"), ("EMAIL", "h@example.invalid"))
+            },
+            False,
+        ),
+    ],
+)
+def test_e2e_merge_commits_get_trailers_only_from_an_agent(
+    wired: Path, env: dict[str, str], *, stamped: bool
+) -> None:
     run_git(wired, "checkout", "-q", "-b", "side")
     stage(wired, "side.txt")
     run_git(wired, "commit", "-q", "--no-verify", "-m", "side")
     run_git(wired, "checkout", "-q", "-")
     stage(wired, "main.txt")
     run_git(wired, "commit", "-q", "--no-verify", "-m", "main")
-    done = subprocess.run(
-        ["git", "merge", "-q", "--no-ff", "-m", "merge side", "side"],
+    merged = subprocess.run(
+        ["git", "merge", "-q", "--no-commit", "--no-ff", "side"],
         capture_output=True,
         text=True,
         check=False,
         cwd=wired,
-        env=hook_env(CLAUDE_E2E),
+        env=hook_env(env),
     )
+    assert merged.returncode == 0, merged.stderr
+    done = git_commit(wired, "merge side", env)
     assert done.returncode == 0, done.stderr
-    assert trailers(wired) == []
+    assert bool(trailers(wired)) is stamped
 
 
 @needs_prek
@@ -5284,13 +5311,21 @@ def test_main_runs_each_command_for_real(
 
 
 @pytest.mark.usefixtures("repo")
+def test_run_trailer_passes_a_merge_commit(tmp_path: Path) -> None:
+    path = msg_file(tmp_path)
+    env = CLAUDE_COMMIT_ENV | {ai.RUN_HOOK_ENV: "1"}
+    assert ai.trailer_command(str(path), "merge", env) == 0
+    assert "Generated-by: LLM " in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.usefixtures("repo")
 def test_run_trailer_refuses_a_successful_noop(tmp_path: Path) -> None:
     path = msg_file(tmp_path)
     env = CLAUDE_COMMIT_ENV | {ai.RUN_HOOK_ENV: "1"}
     with pytest.raises(
         ai.AttributionError, match=r"^run commit requires a Generated-by trailer$"
     ):
-        ai.trailer_command(str(path), "merge", env)
+        ai.trailer_command(str(path), "squash", env)
     with pytest.raises(ai.AttributionError) as caught:
         ai.trailer_command(str(path), None, {ai.RUN_HOOK_ENV: "1"})
     assert str(caught.value) == ai.SESSION_ERROR
@@ -8237,12 +8272,15 @@ def test_cmd_trailer_pick_credits_the_picker_only_as_assisted(
     assert claim["receipts"] == ["a.json"]
 
 
-def test_cmd_trailer_merge_without_cherry_pick_head_still_returns_early(
-    repo: Path, tmp_path: Path
+@pytest.mark.parametrize(
+    ("source", "env"), [("merge", {}), ("squash", CLAUDE_COMMIT_ENV)]
+)
+def test_cmd_trailer_unstamped_merge_without_cherry_pick_head_returns_early(
+    repo: Path, tmp_path: Path, source: str, env: dict[str, str]
 ) -> None:
     stage(repo, "a.txt")
     path = msg_file(tmp_path, "merge\n")
-    assert ai.cmd_trailer(str(path), "merge", CLAUDE_COMMIT_ENV) == 0
+    assert ai.cmd_trailer(str(path), source, env) == 0
     assert path.read_text(encoding="utf-8") == "merge\n"
 
 
